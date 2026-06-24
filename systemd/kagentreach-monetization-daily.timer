@@ -1,9 +1,0 @@
-[Unit]
-Description=Run Kurage Agent Reach monetization worker once a day
-
-[Timer]
-OnCalendar=*-*-* 09:30:00
-Persistent=true
-
-[Install]
-WantedBy=timers.target

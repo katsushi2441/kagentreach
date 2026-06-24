@@ -30,7 +30,9 @@ The helper saves/prints summarized search results. If browser-use cannot return 
 
 ## Daily Monetization Video Digest
 
-`scripts/monetization_daily.py` runs a daily content workflow:
+`scripts/monetization_daily.py` runs the application-specific workflow. In
+production, kdeck owns the schedule and enqueues
+`kagentreach_jobs.run_daily_digest_job` through rqdb4ai.
 
 1. Search overseas long-form YouTube videos around Web3, Codex, Claude Code, vibe coding, SNS, AI, and monetization.
 2. Collect supporting web sources through `mcporter` + Exa when available.
@@ -51,4 +53,12 @@ Full run:
 python3 scripts/monetization_daily.py
 ```
 
-Systemd unit/timer examples are in `systemd/`.
+RQDB4AI entrypoint:
+
+```text
+kagentreach_jobs.run_daily_digest_job
+```
+
+Do not run this workflow from a standalone cron/systemd timer in production.
+Use kdeck Goal Queue so scheduling, cooldown, daily target, and job status stay
+visible in the shared controller.

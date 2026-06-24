@@ -18,10 +18,16 @@ For Claude Code / Codex / Web3 monetization content, useful query patterns inclu
 
 ## Daily Monetization Digest
 
-The daily monetization digest is implemented in:
+The daily monetization digest app logic is implemented in:
 
 ```text
 scripts/monetization_daily.py
+```
+
+The rqdb4ai job entrypoint is:
+
+```text
+kagentreach_jobs.run_daily_digest_job
 ```
 
 It intentionally keeps the discovery layer in `kagentreach` and delegates:
@@ -31,6 +37,10 @@ It intentionally keeps the discovery layer in `kagentreach` and delegates:
 - article storage to `vwork/articles`
 - email cross-posting to the existing SMTP configuration in `/home/kojima/work/aixec/.env`
 - announcement publishing to AIxSNS
+
+Production scheduling belongs to kdeck Goal Queue, not to a standalone
+cron/systemd timer. kdeck enforces daily targets, cooldowns, duplicate-running
+guards, and rqdb4ai job visibility.
 
 Runtime state is stored under `data/` and is ignored by Git so the worker can
 remember already-used source videos without polluting the repository.
