@@ -1,0 +1,19 @@
+# Local secrets
+.env
+*.env
+
+# Upstream OSS clones used as tools/reference
+Agent-Reach/
+
+# Runtime/cache output
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.DS_Store
+
+# Research artifacts and temporary browser outputs
+runs/
+data/*.tmp
+*.log
