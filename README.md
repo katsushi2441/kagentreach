@@ -62,3 +62,16 @@ kagentreach_jobs.run_daily_digest_job
 Do not run this workflow from a standalone cron/systemd timer in production.
 Use kdeck Goal Queue so scheduling, cooldown, daily target, and job status stay
 visible in the shared controller.
+
+### vwork Git Discipline
+
+The daily digest writes articles into `/home/kojima/work/vwork`. The worker must
+never leave generated articles uncommitted:
+
+- before expensive generation, verify `vwork` is clean and rebase from
+  `origin/main`
+- if `vwork` already has unrelated uncommitted changes, stop before generating
+  a Kurage video
+- after writing the article, commit the generated article and `articles.md`
+  before any further pull/rebase
+- after push, verify `vwork` is clean

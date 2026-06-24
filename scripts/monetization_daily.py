@@ -413,19 +413,48 @@ def post_aixsns(title: str, article_url: str, video_url: str, candidate: Candida
     return http_json("POST", AIXSNS_API, payload, timeout=30)
 
 
+def git_status_short(repo: Path) -> str:
+    proc = run(["git", "status", "--short", "--branch"], cwd=repo)
+    if proc.returncode != 0:
+        raise RuntimeError(proc.stderr or proc.stdout)
+    return proc.stdout.strip()
+
+
+def ensure_git_clean(repo: Path, context: str) -> None:
+    status = git_status_short(repo)
+    dirty_lines = [line for line in status.splitlines() if line and not line.startswith("## ")]
+    if dirty_lines:
+        raise RuntimeError(f"{context}: git worktree is dirty; commit or resolve before running.\n{status}")
+
+
+def preflight_vwork_git(commit: bool) -> None:
+    if not commit:
+        return
+    status_before = git_status_short(VWORK_DIR)
+    dirty_before = [line for line in status_before.splitlines() if line and not line.startswith("## ")]
+    if dirty_before:
+        raise RuntimeError(f"vwork preflight blocked: existing uncommitted changes found before generation.\n{status_before}")
+    pull = run(["git", "pull", "--rebase", "origin", "main"], cwd=VWORK_DIR, timeout=180)
+    if pull.returncode != 0:
+        raise RuntimeError(pull.stderr or pull.stdout)
+    ensure_git_clean(VWORK_DIR, "vwork preflight after pull")
+
+
 def git_commit_push_vwork(article_path: Path, commit: bool) -> None:
     if not commit:
         return
     rel = article_path.relative_to(VWORK_DIR)
-    run(["git", "status", "--short", "--branch"], cwd=VWORK_DIR)
-    pull = run(["git", "pull", "--rebase", "origin", "main"], cwd=VWORK_DIR, timeout=180)
-    if pull.returncode != 0:
-        raise RuntimeError(pull.stderr or pull.stdout)
     add = run(["git", "add", str(rel), "articles.md"], cwd=VWORK_DIR)
     if add.returncode != 0:
         raise RuntimeError(add.stderr or add.stdout)
+    staged = run(["git", "diff", "--cached", "--quiet"], cwd=VWORK_DIR)
+    if staged.returncode == 0:
+        ensure_git_clean(VWORK_DIR, "vwork commit skipped")
+        return
+    if staged.returncode not in {0, 1}:
+        raise RuntimeError(staged.stderr or staged.stdout)
     commit_proc = run(["git", "commit", "-m", f"Add AI monetization video digest: {article_path.stem}"], cwd=VWORK_DIR)
-    if commit_proc.returncode != 0 and "nothing to commit" not in (commit_proc.stdout + commit_proc.stderr):
+    if commit_proc.returncode != 0:
         raise RuntimeError(commit_proc.stderr or commit_proc.stdout)
     pull2 = run(["git", "pull", "--rebase", "origin", "main"], cwd=VWORK_DIR, timeout=180)
     if pull2.returncode != 0:
@@ -433,6 +462,7 @@ def git_commit_push_vwork(article_path: Path, commit: bool) -> None:
     push = run(["git", "push"], cwd=VWORK_DIR, timeout=180)
     if push.returncode != 0:
         raise RuntimeError(push.stderr or push.stdout)
+    ensure_git_clean(VWORK_DIR, "vwork after push")
 
 
 def main() -> None:
@@ -457,6 +487,7 @@ def main() -> None:
     if args.dry_run:
         return
 
+    preflight_vwork_git(commit=not args.no_commit)
     kmontage_job = create_kmontage_video(candidate, wait=not args.no_wait, timeout_seconds=args.timeout_seconds)
     slug = slugify("ai-monetization-" + candidate.title)
     title, article = build_article(candidate, kmontage_job, supporting, slug)
