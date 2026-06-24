@@ -15,5 +15,6 @@ __pycache__/
 
 # Research artifacts and temporary browser outputs
 runs/
-data/*.tmp
+data/
+storage/
 *.log

@@ -27,3 +27,28 @@ Use the helper below to search X without extracting or printing cookies. It reus
 ```
 
 The helper saves/prints summarized search results. If browser-use cannot return strict JSON, the raw result is preserved so downstream jobs can still inspect it.
+
+## Daily Monetization Video Digest
+
+`scripts/monetization_daily.py` runs a daily content workflow:
+
+1. Search overseas long-form YouTube videos around Web3, Codex, Claude Code, vibe coding, SNS, AI, and monetization.
+2. Collect supporting web sources through `mcporter` + Exa when available.
+3. Send the best unused video to Kurage Montage.
+4. Create an AI OSS technical article under `vwork/articles/`.
+5. Include both the original reference video and the generated Kurage video URL.
+6. Cross-post by email to Hatena/Blogger and announce on AIxSNS.
+
+Dry run:
+
+```bash
+python3 scripts/monetization_daily.py --dry-run
+```
+
+Full run:
+
+```bash
+python3 scripts/monetization_daily.py
+```
+
+Systemd unit/timer examples are in `systemd/`.

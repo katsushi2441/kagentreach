@@ -15,3 +15,22 @@ For Claude Code / Codex / Web3 monetization content, useful query patterns inclu
 - `vibe coding make money app`
 - `Codex Claude Code developer agency`
 - `Web3 AI agent crypto automation`
+
+## Daily Monetization Digest
+
+The daily monetization digest is implemented in:
+
+```text
+scripts/monetization_daily.py
+```
+
+It intentionally keeps the discovery layer in `kagentreach` and delegates:
+
+- reference-video summarization to `kmontage`
+- video rendering to Kurage
+- article storage to `vwork/articles`
+- email cross-posting to the existing SMTP configuration in `/home/kojima/work/aixec/.env`
+- announcement publishing to AIxSNS
+
+Runtime state is stored under `data/` and is ignored by Git so the worker can
+remember already-used source videos without polluting the repository.
