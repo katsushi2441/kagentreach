@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -8,6 +9,7 @@ from typing import Any
 
 
 ROOT = Path(__file__).resolve().parent
+KURAGE_WEB_BACKEND = Path(os.environ.get("KURAGE_WEB_BACKEND", "/home/kojima/work/kurage_web/backend"))
 
 
 def _last_json(stdout: str) -> dict[str, Any]:
@@ -54,3 +56,95 @@ def run_daily_digest_job(dry_run: bool = False, **kwargs: Any) -> dict[str, Any]
     if not ok:
         raise RuntimeError(json.dumps(result, ensure_ascii=False))
     return result
+
+
+def _load_kurage_geopolitics_module() -> Any:
+    if str(KURAGE_WEB_BACKEND) not in sys.path:
+        sys.path.insert(0, str(KURAGE_WEB_BACKEND))
+    import geopolitics_video_jobs  # type: ignore
+
+    return geopolitics_video_jobs
+
+
+def collect_geopolitics_osint_sources_job(
+    target_count: int = 24,
+    query: str | None = None,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """Collect OSINT reference/footage candidates through kagentreach.
+
+    The underlying media registry remains in kurage_web because entertainment.php
+    owns the published data files. kdeck/rqdb4ai call this kagentreach entrypoint
+    so discovery is controlled from the shared research layer.
+    """
+    module = _load_kurage_geopolitics_module()
+    result = module.collect_sources_job(
+        target_count=int(target_count or kwargs.get("target_count") or 24),
+        query=query or kwargs.get("query") or module.DEFAULT_QUERY,
+        source=str(kwargs.get("source") or "rqdb4ai"),
+    )
+    return {
+        "ok": bool(result.get("ok", True)),
+        "status": result.get("status") or "ok",
+        "items": int(result.get("items") or result.get("created") or 0),
+        "created": int(result.get("created") or result.get("items") or 0),
+        "source": str(kwargs.get("source") or "rqdb4ai"),
+        "result": result,
+    }
+
+
+def run_geopolitics_osint_video_job(
+    dry_run: bool = False,
+    topic: str = "",
+    target_minutes: int = 10,
+    force_run: bool = False,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """RQDB4AI entrypoint for the daily geopolitics/war OSINT YouTube video.
+
+    kagentreach owns the research-layer entrypoint, kdeck owns schedule/cooldown,
+    rqdb4ai owns execution, and kurage_web owns publishing data for
+    entertainment.php.
+    """
+    module = _load_kurage_geopolitics_module()
+    topic = topic or str(kwargs.get("topic") or module.DEFAULT_TOPIC)
+    target_minutes = int(target_minutes or kwargs.get("target_minutes") or 10)
+    if dry_run:
+        return collect_geopolitics_osint_sources_job(
+            target_count=int(kwargs.get("target_count") or os.environ.get("KURAGE_GEOPOLITICS_CANDIDATE_COUNT", "24")),
+            query=str(kwargs.get("query") or module.DEFAULT_QUERY),
+            source=str(kwargs.get("source") or "rqdb4ai"),
+        )
+    old_force = os.environ.get("KURAGE_GEOPOLITICS_FORCE_RUN")
+    if force_run:
+        os.environ["KURAGE_GEOPOLITICS_FORCE_RUN"] = "1"
+    try:
+        result = module.produce_daily_video_job(
+            topic=topic,
+            target_minutes=target_minutes,
+            source=str(kwargs.get("source") or "rqdb4ai"),
+        )
+    finally:
+        if force_run:
+            if old_force is None:
+                os.environ.pop("KURAGE_GEOPOLITICS_FORCE_RUN", None)
+            else:
+                os.environ["KURAGE_GEOPOLITICS_FORCE_RUN"] = old_force
+    ok = bool(result.get("ok"))
+    already_done = str(result.get("status") or "") == "skipped" and str(result.get("reason") or "") == "already_published_today"
+    items = int(result.get("items") or result.get("created") or 0)
+    if already_done:
+        items = 1
+    wrapped = {
+        "ok": ok,
+        "status": result.get("status") or ("ok" if ok else "error"),
+        "items": items,
+        "created": items,
+        "source": str(kwargs.get("source") or "rqdb4ai"),
+        "youtube_url": result.get("youtube_url") or "",
+        "article_url": result.get("article_url") or "",
+        "result": result,
+    }
+    if not ok:
+        raise RuntimeError(json.dumps(wrapped, ensure_ascii=False))
+    return wrapped

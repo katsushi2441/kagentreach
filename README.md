@@ -75,3 +75,26 @@ never leave generated articles uncommitted:
 - after writing the article, commit the generated article and `articles.md`
   before any further pull/rebase
 - after push, verify `vwork` is clean
+
+## Geopolitics / War OSINT Video
+
+Geopolitics and war OSINT video publishing also runs through the shared
+kagentreach -> kdeck -> rqdb4ai pattern.
+
+RQDB4AI entrypoints:
+
+```text
+kagentreach_jobs.collect_geopolitics_osint_sources_job
+kagentreach_jobs.run_geopolitics_osint_video_job
+```
+
+Responsibilities:
+
+- kagentreach owns the research-layer entrypoint and query/collection control
+- kdeck owns the daily goal, duplicate guard, cooldown, and status visibility
+- rqdb4ai owns queue execution
+- kurage_web still owns entertainment.php data files, YouTube upload, and
+  published article registration
+
+Do not run the old `kurage-geopolitics-video.timer` in production; the kdeck
+Goal Queue should be the only scheduler.
