@@ -96,5 +96,15 @@ Responsibilities:
 - kurage_web still owns entertainment.php data files, YouTube upload, and
   published article registration
 
+Script quality rule:
+
+- The narration must explain the geopolitical/OSINT topic itself. Do not put
+  production notes, license disclaimers, YouTube reused-content warnings,
+  violence-policy caveats, or footage-handling instructions into the spoken
+  script. Those notes belong in metadata, source lists, or article safety notes,
+  not in the video narration.
+- If the generated narration becomes mostly production notes after cleanup, the
+  worker must reject it and regenerate/fallback to a real explainer script.
+
 Do not run the old `kurage-geopolitics-video.timer` in production; the kdeck
 Goal Queue should be the only scheduler.
