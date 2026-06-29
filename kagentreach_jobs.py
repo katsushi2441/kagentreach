@@ -58,6 +58,62 @@ def run_daily_digest_job(dry_run: bool = False, **kwargs: Any) -> dict[str, Any]
     return result
 
 
+def run_ai_monetization_longform_video_job(
+    dry_run: bool = False,
+    topic: str = "",
+    target_minutes: int = 10,
+    force_run: bool = False,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """RQDB4AI entrypoint for the AI/Web3 monetization long-form YouTube video.
+
+    This is the replacement path for the former war/geopolitics OSINT daily
+    long-form slot. kagentreach owns the topic/research entrypoint, kdeck owns
+    schedule/cooldown, rqdb4ai owns execution, and kurage_web owns the public
+    entertainment.php data.
+    """
+    cmd = [
+        sys.executable,
+        str(ROOT / "scripts" / "ai_monetization_longform_video.py"),
+        "run",
+        "--target-minutes",
+        str(int(target_minutes or kwargs.get("target_minutes") or 10)),
+    ]
+    if topic or kwargs.get("topic"):
+        cmd.extend(["--topic", str(topic or kwargs.get("topic"))])
+    if dry_run:
+        cmd.append("--dry-run")
+    if force_run:
+        cmd.append("--force-run")
+    if kwargs.get("target_count"):
+        cmd.extend(["--target-count", str(int(kwargs["target_count"]))])
+
+    proc = subprocess.run(cmd, cwd=str(ROOT), text=True, capture_output=True, timeout=int(kwargs.get("timeout_seconds") or 7200))
+    parsed = _last_json(proc.stdout)
+    ok = proc.returncode == 0 and bool(parsed.get("ok", dry_run))
+    already_done = str(parsed.get("status") or "") == "skipped" and str(parsed.get("reason") or "") == "already_published_today"
+    items = int(parsed.get("items") or parsed.get("created") or 0)
+    if already_done:
+        items = 1
+    wrapped: dict[str, Any] = {
+        "ok": ok,
+        "status": parsed.get("status") or ("ok" if ok else "error"),
+        "items": items,
+        "created": items,
+        "dry_run": dry_run,
+        "source": str(kwargs.get("source") or "rqdb4ai"),
+        "returncode": proc.returncode,
+        "youtube_url": parsed.get("youtube_url") or "",
+        "article_url": parsed.get("article_url") or "",
+        "result": parsed,
+    }
+    if proc.stderr.strip():
+        wrapped["stderr"] = proc.stderr[-4000:]
+    if not ok:
+        raise RuntimeError(json.dumps(wrapped, ensure_ascii=False))
+    return wrapped
+
+
 def _load_kurage_geopolitics_module() -> Any:
     if str(KURAGE_WEB_BACKEND) not in sys.path:
         sys.path.insert(0, str(KURAGE_WEB_BACKEND))

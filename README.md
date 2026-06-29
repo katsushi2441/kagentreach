@@ -76,10 +76,57 @@ never leave generated articles uncommitted:
   before any further pull/rebase
 - after push, verify `vwork` is clean
 
+## AI/Web3 Monetization Long-Form Video
+
+The former daily war/geopolitics long-form video slot is replaced by an
+AI/Web3/Codex/Claude Code/SNS monetization long-form workflow.
+
+RQDB4AI entrypoint:
+
+```text
+kagentreach_jobs.run_ai_monetization_longform_video_job
+```
+
+Responsibilities:
+
+- kagentreach owns topic rotation, YouTube trend/reference discovery, and the
+  application entrypoint
+- kdeck owns the once-a-day goal, cooldown, duplicate guard, and status
+  visibility
+- rqdb4ai owns queue execution on `kurage-video-worker`
+- kurage_web owns entertainment.php article data, YouTube upload, and public
+  JSON sync
+
+Content rule:
+
+- YouTube is used only for trend/reference metadata. Do not download other
+  creators' videos as raw footage.
+- Video footage must come from license-explicit sources such as Wikimedia
+  Commons, then be transformed with Japanese narration, overlays, Kurage avatar,
+  and source notes.
+- Narration must focus on useful business/technical content: AI coding, OSS
+  productization, Web3/crypto information products, SNS funnels, revenue paths,
+  risks, and improvement loops. Do not drift into war/geopolitics/OSINT.
+- If the script becomes thin, generic, or mostly production notes, reject it and
+  regenerate/fallback to a real explainer script.
+
+Dry run / source collection:
+
+```bash
+python3 scripts/ai_monetization_longform_video.py --dry-run
+```
+
+Full run:
+
+```bash
+python3 scripts/ai_monetization_longform_video.py run
+```
+
 ## Geopolitics / War OSINT Video
 
-Geopolitics and war OSINT video publishing also runs through the shared
-kagentreach -> kdeck -> rqdb4ai pattern.
+Geopolitics and war OSINT video publishing is kept as a disabled reference. The
+daily production slot should use the AI/Web3 monetization long-form workflow
+above unless the content strategy explicitly returns to geopolitics.
 
 RQDB4AI entrypoints:
 
