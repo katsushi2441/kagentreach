@@ -10,6 +10,7 @@ clear errors or partial research.
 from __future__ import annotations
 
 import argparse
+import html
 import json
 import os
 import re
@@ -20,6 +21,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
+from urllib.request import Request, urlopen
 
 ROOT = Path(__file__).resolve().parents[1]
 WORK_ROOT = Path(os.environ.get("KURAGE_WORK_ROOT", "/home/kojima/work"))
@@ -45,6 +47,88 @@ def build_query(url: str, title: str, query: str) -> str:
     host = parsed.netloc.replace("www.", "")
     path_terms = " ".join([p for p in re.split(r"[-_/]+", parsed.path) if len(p) >= 3][:8])
     return clean_text(f"{host} {path_terms}", 160)
+
+
+def is_yahoo_comments_url(url: str) -> bool:
+    parsed = urlparse(url)
+    host = parsed.netloc.lower()
+    return host.endswith("news.yahoo.co.jp") and "/comments" in parsed.path
+
+
+def fetch_yahoo_comments(url: str, limit: int) -> tuple[list[dict[str, Any]], dict[str, Any], str]:
+    if not is_yahoo_comments_url(url):
+        return [], {}, ""
+    req = Request(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
+            "Accept-Language": "ja,en;q=0.8",
+        },
+    )
+    try:
+        with urlopen(req, timeout=30) as res:
+            raw = res.read().decode("utf-8", errors="replace")
+    except Exception as exc:
+        return [], {}, str(exc)
+
+    title_match = re.search(r'<meta\s+property=["\']og:title["\']\s+content=["\']([^"\']+)["\']', raw)
+    page_title = clean_text(html.unescape(title_match.group(1)), 220) if title_match else ""
+    state: dict[str, Any] = {}
+    match = re.search(r"window\.__PRELOADED_STATE__\s*=\s*(\{.*?\})\s*</script>", raw, flags=re.S)
+    if match:
+        try:
+            state = json.loads(html.unescape(match.group(1)))
+        except Exception:
+            state = {}
+    if not state:
+        idx = raw.find('"userCommentList"')
+        return [], {}, "Yahoo comments state JSON was not found" if idx < 0 else "Yahoo comments state JSON parse failed"
+
+    article = state.get("article") if isinstance(state.get("article"), dict) else {}
+    comment_list = state.get("userCommentList") if isinstance(state.get("userCommentList"), list) else []
+    if not comment_list:
+        # Some pages store comments below commentStore-like nested objects.
+        def walk(obj: Any) -> list[dict[str, Any]]:
+            if isinstance(obj, dict):
+                if isinstance(obj.get("userCommentList"), list):
+                    return obj["userCommentList"]
+                for value in obj.values():
+                    found = walk(value)
+                    if found:
+                        return found
+            elif isinstance(obj, list):
+                for value in obj:
+                    found = walk(value)
+                    if found:
+                        return found
+            return []
+        comment_list = walk(state)
+
+    comments: list[dict[str, Any]] = []
+    for item in comment_list:
+        if not isinstance(item, dict):
+            continue
+        text = clean_text(item.get("text") or "", 520)
+        if len(text) < 20:
+            continue
+        comments.append({
+            "platform": "Yahooコメント",
+            "author": clean_text(item.get("name") or "", 60),
+            "text": text,
+            "url": item.get("permalink") or url,
+            "empathy_count": int(item.get("empathyCount") or 0),
+            "insight_count": int(item.get("insightCount") or 0),
+            "negative_count": int(item.get("negativeCount") or 0),
+            "reply_count": int(item.get("replyCount") or 0),
+            "posted_at": clean_text(item.get("postDate") or "", 40),
+        })
+    comments.sort(key=lambda x: (int(x.get("empathy_count") or 0), int(x.get("insight_count") or 0)), reverse=True)
+    meta = {
+        "title": clean_text(article.get("title") or page_title, 180),
+        "publisher": clean_text(article.get("providerName") or article.get("mediaName") or "", 80),
+        "comment_total": state.get("parentOnlyCommentTotalCount") or len(comment_list),
+    }
+    return comments[:limit], meta, ""
 
 
 def parse_mcporter_exa(stdout: str, limit: int) -> list[dict[str, str]]:
@@ -154,8 +238,26 @@ def search_x(query: str, limit: int, mode: str) -> tuple[list[dict[str, Any]], s
         return [], clean_text(proc.stdout or proc.stderr, 1000)
 
 
-def opinion_points(web: list[dict[str, Any]], youtube: list[dict[str, Any]], x_results: list[dict[str, Any]]) -> list[dict[str, str]]:
+def opinion_points(
+    web: list[dict[str, Any]],
+    youtube: list[dict[str, Any]],
+    x_results: list[dict[str, Any]],
+    yahoo_comments: list[dict[str, Any]],
+) -> list[dict[str, str]]:
     points: list[dict[str, str]] = []
+    for item in yahoo_comments:
+        text = clean_text(item.get("text") or "", 260)
+        if text:
+            label = f"共感 {item.get('empathy_count', 0)}件"
+            if item.get("insight_count"):
+                label += f"、なるほど {item.get('insight_count')}件"
+            points.append({
+                "platform": "Yahooコメント",
+                "point": f"{label}。{text}",
+                "source_title": clean_text(item.get("author") or "Yahooコメント", 120),
+                "source_url": str(item.get("url") or ""),
+                "empathy_count": str(item.get("empathy_count") or 0),
+            })
     for item in x_results:
         text = clean_text(item.get("text") or item.get("summary") or item.get("why_relevant") or "", 220)
         if text:
@@ -195,6 +297,10 @@ def main() -> int:
     limit = max(3, min(12, args.limit))
     errors: list[str] = []
 
+    yahoo_comments, yahoo_meta, yahoo_error = fetch_yahoo_comments(args.url, limit)
+    if yahoo_error:
+        errors.append(f"yahoo_comments: {yahoo_error}")
+
     web, web_error = search_web(query, limit)
     if web_error:
         errors.append(f"web: {web_error}")
@@ -207,15 +313,15 @@ def main() -> int:
         if x_error:
             errors.append(f"x: {x_error}")
 
-    points = opinion_points(web, youtube, x_results)
+    points = opinion_points(web, youtube, x_results, yahoo_comments)
     result = {
         "ok": bool(points),
         "url": args.url,
         "query": query,
-        "sources": {"web": web, "youtube": youtube, "x": x_results},
+        "sources": {"yahoo_comments": yahoo_comments, "yahoo_meta": yahoo_meta, "web": web, "youtube": youtube, "x": x_results},
         "opinion_points": points,
         "errors": errors,
-        "summary": f"Web {len(web)}件、YouTube {len(youtube)}件、X {len(x_results)}件から意見候補 {len(points)}件を収集しました。",
+        "summary": f"Yahooコメント {len(yahoo_comments)}件、Web {len(web)}件、YouTube {len(youtube)}件、X {len(x_results)}件から意見候補 {len(points)}件を収集しました。",
     }
     text = json.dumps(result, ensure_ascii=False, indent=2)
     if args.out:
