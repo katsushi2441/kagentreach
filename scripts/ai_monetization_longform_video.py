@@ -344,7 +344,7 @@ def generate_script(topic: str, references: list[dict[str, Any]], target_minutes
 - 構成は、{chapters_text}。章ごとに具体例を入れる。
 - JSONだけで返す。title, summary, narration, chapters を持つ。
 """.strip()
-    ollama_url = os.environ.get("OLLAMA_URL", "http://192.168.0.3:11434/api/generate")
+    ollama_url = os.environ.get("OLLAMA_URL", "http://192.168.0.14:11434/api/generate")
     if not ollama_url.endswith("/api/generate"):
         ollama_url = ollama_url.rstrip("/") + "/api/generate"
     model = os.environ.get("OLLAMA_MODEL", "gemma4:12b-it-qat")

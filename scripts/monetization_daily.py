@@ -30,7 +30,7 @@ STATE_PATH = Path(os.environ.get("KAGENTREACH_MONETIZATION_STATE", ROOT / "data"
 VWORK_DIR = Path(os.environ.get("VWORK_DIR", "/home/kojima/work/vwork"))
 KMONTAGE_API = os.environ.get("KMONTAGE_API", "http://127.0.0.1:18305").rstrip("/")
 AIXSNS_API = os.environ.get("AIXSNS_API", "https://aixec.exbridge.jp/api.php?path=posts")
-OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://192.168.0.3:11434").rstrip("/")
+OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://192.168.0.14:11434").rstrip("/")
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "gemma4:12b-it-qat")
 BASE_ARTICLE_URL = "https://katsushi2441.github.io/vwork/articles"
 KURAGE_URL = "https://kurage.exbridge.jp/kuragev.php"
