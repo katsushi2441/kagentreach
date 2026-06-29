@@ -114,6 +114,7 @@ PRODUCTION_NOTE_TERMS = (
     "この動画では", "本動画では", "映像素材として", "素材として", "YouTube上", "Wikimedia Commons",
 )
 MIN_EXPLANATORY_CHARS = 1100
+SUSPICIOUS_SCRIPT_TERMS = ("Projected.com", "outsourcing and", "small SaaS production", "個人Projected", "http://", "https://")
 
 
 def now_jst() -> str:
@@ -302,6 +303,20 @@ def validate_narration_content(text: str) -> None:
     hits = [term for term in bad if term in cleaned]
     if hits:
         raise ValueError(f"wrong niche terms leaked into narration: {hits[:5]}")
+    if any(term in cleaned for term in SUSPICIOUS_SCRIPT_TERMS):
+        raise ValueError("suspicious generated text leaked into narration")
+    if re.search(r"[A-Za-z][A-Za-z0-9 .,/&()_-]{45,}", cleaned):
+        raise ValueError("narration contains a long raw English fragment")
+
+
+def validate_summary_content(text: str) -> None:
+    cleaned = plain_text(text)
+    if len(cleaned) < 20:
+        raise ValueError("summary is too short")
+    if any(term in cleaned for term in SUSPICIOUS_SCRIPT_TERMS):
+        raise ValueError("suspicious generated text leaked into summary")
+    if re.search(r"[A-Za-z][A-Za-z0-9 .,/&()_-]{35,}", cleaned):
+        raise ValueError("summary contains a long raw English fragment")
 
 
 def generate_script(topic: str, references: list[dict[str, Any]], target_minutes: int = 10, footage: list[dict[str, Any]] | None = None, profile: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -345,6 +360,7 @@ def generate_script(topic: str, references: list[dict[str, Any]], target_minutes
             parsed["narration"] = narration
             parsed["title"] = plain_text(parsed.get("title"), 72)
             parsed["summary"] = plain_text(parsed.get("summary") or "AI、OSS、動画、SNS、自動化を組み合わせた収益化戦略を整理します。", 160)
+            validate_summary_content(str(parsed["summary"]))
             return parsed
     except Exception:
         pass
@@ -582,6 +598,7 @@ def produce_daily_video_job(topic: str = DEFAULT_TOPIC, target_minutes: int = 10
     work = WORK_DIR / job_id
     script = generate_script(topic, references, target_minutes=target_minutes, footage=footage, profile=profile)
     video = build_video(topic, script, footage, work, target_minutes=target_minutes)
+    write_json(work / "script.json", script)
     sources = read_json(work / "sources.json", [])
     description = "\n".join([
         normalize_space(script.get("summary") or "AI/Web3収益化とOSS実装の長尺解説です。"),
