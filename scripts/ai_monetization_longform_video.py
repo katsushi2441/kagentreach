@@ -325,23 +325,55 @@ def command_output_json(cmd: list[str], *, cwd: Path | None = None, timeout: int
         raise RuntimeError(f"failed to parse JSON from {' '.join(cmd[:2])}: {exc}") from exc
 
 
+def _loads_lenient_json_object(text: str) -> dict[str, Any]:
+    try:
+        value = json.loads(text)
+    except json.JSONDecodeError:
+        repaired = re.sub(r"\\(?![\"\\/bfnrtu])", r"\\\\", text)
+        repaired = re.sub(r",\s*([}\]])", r"\1", repaired)
+        value = json.loads(repaired)
+    if isinstance(value, dict):
+        return value
+    raise ValueError("JSON value is not an object")
+
+
+def _clean_jsonish_string(value: str) -> str:
+    value = value.replace("\r", " ").replace("\n", " ")
+    value = value.replace("\\n", " ").replace("\\t", " ")
+    value = value.replace('\\"', '"')
+    value = re.sub(r"\\(?![\"\\/bfnrtu])", "", value)
+    return normalize_space(value)
+
+
+def _extract_jsonish_fields(text: str) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for name in ("title", "summary", "narration"):
+        pattern = rf'"{name}"\s*:\s*"([\s\S]*?)"\s*(?=,\s*"(?:title|summary|narration|chapters|source_takeaways)"\s*:|\s*}})'
+        match = re.search(pattern, text)
+        if match:
+            result[name] = _clean_jsonish_string(match.group(1))
+    if result.get("narration"):
+        return result
+    raise ValueError("LLM response did not contain recoverable title/summary/narration fields")
+
+
 def extract_json_object(text: str) -> dict[str, Any]:
     text = text.strip()
     text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.I)
     text = re.sub(r"\s*```$", "", text)
     try:
-        value = json.loads(text)
-        if isinstance(value, dict):
-            return value
+        return _loads_lenient_json_object(text)
     except Exception:
         pass
     start = text.find("{")
     end = text.rfind("}")
     if start >= 0 and end > start:
-        value = json.loads(text[start:end + 1])
-        if isinstance(value, dict):
-            return value
-    raise ValueError("LLM response did not contain a JSON object")
+        chunk = text[start:end + 1]
+        try:
+            return _loads_lenient_json_object(chunk)
+        except Exception:
+            return _extract_jsonish_fields(chunk)
+    return _extract_jsonish_fields(text)
 
 
 def ollama_generate_json(prompt: str, *, timeout: int = 420) -> dict[str, Any]:
@@ -382,10 +414,18 @@ def fetch_youtube_metadata(url: str) -> dict[str, Any]:
 
 
 def download_reference_youtube_video(url: str, work: Path) -> Path:
+    cache_dir = WORK_DIR / "reference_cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_file = cache_dir / f"{slugify(url, 'yt')}.mp4"
+    if cache_file.exists() and cache_file.stat().st_size > 1024 * 1024:
+        out_cached = work / "reference_video.mp4"
+        if not out_cached.exists():
+            os.link(cache_file, out_cached)
+        return out_cached
     out_tmpl = str(work / "reference_video.%(ext)s")
     cmd = [
         "yt-dlp", "--no-playlist", "--no-warnings",
-        "-f", "bv*[height<=720][ext=mp4]+ba[ext=m4a]/b[height<=720][ext=mp4]/b[height<=720]",
+        "-f", "bv*[height<=720][vcodec!*=av01][ext=mp4]+ba[ext=m4a]/b[height<=720][vcodec!*=av01][ext=mp4]/bv*[height<=720][vcodec!*=av01]+ba/b[height<=720][vcodec!*=av01]/b[height<=720]",
         "--merge-output-format", "mp4", "-o", out_tmpl, url,
     ]
     proc = run(cmd, timeout=1800)
@@ -395,6 +435,11 @@ def download_reference_youtube_video(url: str, work: Path) -> Path:
     matches = [m for m in matches if m.suffix.lower() in {".mp4", ".webm", ".mkv"} and m.stat().st_size > 1024 * 1024]
     if not matches:
         raise RuntimeError("reference YouTube download produced no usable video file")
+    if matches[0].suffix.lower() == ".mp4":
+        try:
+            shutil.copy2(matches[0], cache_file)
+        except Exception:
+            pass
     return matches[0]
 
 
@@ -683,14 +728,16 @@ def validate_reference_script(script: dict[str, Any], target_minutes: int) -> No
 
 def generate_reference_script(topic: str, reference: dict[str, Any], transcript: str, target_minutes: int = 10) -> dict[str, Any]:
     title = plain_text(reference.get("title") or topic, 160)
-    description = plain_text(reference.get("description") or "", 2600)
+    description = plain_text(reference.get("description") or "", 3200)
     uploader = plain_text(reference.get("uploader") or "", 80)
-    transcript_excerpt = plain_text(transcript, 9000)
+    transcript_excerpt = plain_text(transcript, 12000)
     if not transcript_excerpt and not description:
         raise RuntimeError("reference source has no transcript or description; refusing to create a generic video")
-    prompt = f"""
+    target_chars = max(3400, int(target_minutes) * 390)
+    base_prompt = f"""
 あなたは日本語のビジネス/技術解説動画の構成作家です。
-元になる参照素材を忠実に読み解き、10分前後の日本語解説台本にしてください。
+元になる参照素材を忠実に読み解き、{target_minutes}分前後の日本語解説台本にしてください。
+ナレーション本文は最低{target_chars}文字。短くまとめすぎないでください。
 
 テーマ: {topic}
 参照元タイトル: {title}
@@ -717,10 +764,61 @@ def generate_reference_script(topic: str, reference: dict[str, Any], transcript:
 5. Kurage/AI/OSSで応用するならどう作るか
 6. まとめ
 """.strip()
-    parsed = ollama_generate_json(prompt, timeout=520)
+
+    parsed = ollama_generate_json(base_prompt, timeout=620)
     parsed["title"] = plain_text(parsed.get("title") or title, 76)
     parsed["summary"] = plain_text(parsed.get("summary") or f"参照素材「{title}」の要点を日本語で整理します。", 180)
     parsed["narration"] = clean_narration(str(parsed.get("narration") or ""))
+
+    if len(parsed["narration"]) < target_chars:
+        expand_prompt = f"""
+次の台本は短すぎます。参照元情報に忠実なまま、{target_minutes}分動画向けに最低{target_chars}文字まで拡張してください。
+一般論の水増しは禁止です。章ごとに、手順、収益化の考え方、再現条件、失敗例、Kurage/AI/OSSへの応用を具体化してください。
+
+参照元タイトル: {title}
+参照元概要:
+{description}
+参照元字幕または本文抜粋:
+{transcript_excerpt}
+
+現在の台本:
+{parsed['narration']}
+
+出力はJSONだけ。title, summary, narration, chapters, source_takeaways を持つ。
+""".strip()
+        expanded = ollama_generate_json(expand_prompt, timeout=720)
+        expanded["title"] = plain_text(expanded.get("title") or parsed.get("title") or title, 76)
+        expanded["summary"] = plain_text(expanded.get("summary") or parsed.get("summary") or f"参照素材「{title}」の要点を日本語で整理します。", 180)
+        expanded["narration"] = clean_narration(str(expanded.get("narration") or ""))
+        if len(expanded["narration"]) > len(parsed["narration"]):
+            parsed = expanded
+
+    min_chars = max(900, int(target_minutes) * 240)
+    append_attempts = 0
+    while len(parsed["narration"]) < min_chars and append_attempts < 2:
+        append_attempts += 1
+        append_prompt = f"""
+次の台本に追加する補足パートだけを作ってください。参照元情報に忠実に、現在不足している内容を具体化します。
+一般論は禁止。URLや英語タイトルの読み上げは禁止。制作上の注意事項は禁止。
+追加パートは800文字以上。JSONのnarrationに追加パート本文だけを入れてください。
+
+参照元タイトル: {title}
+参照元概要:
+{description}
+参照元字幕または本文抜粋:
+{transcript_excerpt}
+
+現在の台本:
+{parsed['narration']}
+
+出力はJSONだけ。title, summary, narration を持つ。
+""".strip()
+        extra = ollama_generate_json(append_prompt, timeout=520)
+        extra_text = clean_narration(str(extra.get("narration") or ""))
+        if len(extra_text) < 120:
+            break
+        parsed["narration"] = clean_narration(parsed["narration"] + extra_text)
+
     validate_reference_script(parsed, target_minutes)
     return parsed
 
