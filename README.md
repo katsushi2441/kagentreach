@@ -99,16 +99,40 @@ Responsibilities:
 
 Content rule:
 
-- YouTube is used only for trend/reference metadata. Do not download other
-  creators' videos as raw footage.
-- Video footage must come from license-explicit sources such as Wikimedia
-  Commons, then be transformed with Japanese narration, overlays, Kurage avatar,
-  and source notes.
-- Narration must focus on useful business/technical content: AI coding, OSS
-  productization, Web3/crypto information products, SNS funnels, revenue paths,
-  risks, and improvement loops. Do not drift into war/geopolitics/OSINT.
-- If the script becomes thin, generic, or mostly production notes, reject it and
-  regenerate/fallback to a real explainer script.
+- The production YouTube upload path still uses license-explicit footage by
+  default. Do not silently upload a video built from unreviewed third-party
+  YouTube excerpts.
+- The review path is `test-kurage`: it may use visual excerpts from the
+  source YouTube video, pages from a source PDF, or screenshots from a source
+  blog/article so the result can be checked on `kuragev.php` before any public
+  YouTube upload decision.
+- A one-hour-plus viral YouTube video compressed into a 10-minute explainer is
+  one valid pattern, not a hard requirement. The hard requirement is faithful
+  source analysis with relevant real/screen/document visuals.
+- Reference-visual generation must fail loudly if it cannot use the specified
+  YouTube/PDF/blog source. Do not fall back to unrelated stock/Wikimedia footage and
+  pretend it reflects the reference.
+- Narration must be faithful to the reference source: concrete takeaways,
+  numbers, steps, risks, and monetization logic. Do not drift into
+  war/geopolitics/OSINT, generic AI hype, or repeated filler.
+- Production notes, license caveats, URL spelling, and raw English titles belong
+  in metadata, not in the spoken script.
+- If the script becomes thin, generic, repetitive, or mostly production notes,
+  reject it and regenerate/fail instead of producing an "inchiki" video.
+
+Kurage review generation from a specific source URL:
+
+```bash
+python3 scripts/ai_monetization_longform_video.py test-kurage \
+  --force-url 'https://www.youtube.com/watch?v=...' \
+  --target-minutes 10
+```
+
+RQDB4AI review entrypoint:
+
+```text
+kagentreach_jobs.run_ai_monetization_reference_kurage_test_job
+```
 
 Dry run / source collection:
 
@@ -116,7 +140,7 @@ Dry run / source collection:
 python3 scripts/ai_monetization_longform_video.py --dry-run
 ```
 
-Full run:
+Full production run after review approval:
 
 ```bash
 python3 scripts/ai_monetization_longform_video.py run

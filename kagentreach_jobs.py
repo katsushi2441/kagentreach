@@ -114,6 +114,53 @@ def run_ai_monetization_longform_video_job(
     return wrapped
 
 
+def run_ai_monetization_reference_kurage_test_job(
+    topic: str = "",
+    target_minutes: int = 10,
+    force_url: str = "",
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """RQDB4AI entrypoint for Kurage-first reference-visual review videos.
+
+This uses source YouTube excerpts or PDF pages as the visual reference and
+registers the result in kuragev.php for review. It intentionally does not
+upload to YouTube.
+    """
+    cmd = [
+        sys.executable,
+        str(ROOT / "scripts" / "ai_monetization_longform_video.py"),
+        "test-kurage",
+        "--target-minutes",
+        str(int(target_minutes or kwargs.get("target_minutes") or 10)),
+    ]
+    if topic or kwargs.get("topic"):
+        cmd.extend(["--topic", str(topic or kwargs.get("topic"))])
+    if force_url or kwargs.get("force_url"):
+        cmd.extend(["--force-url", str(force_url or kwargs.get("force_url"))])
+    if kwargs.get("target_count"):
+        cmd.extend(["--target-count", str(int(kwargs["target_count"]))])
+
+    proc = subprocess.run(cmd, cwd=str(ROOT), text=True, capture_output=True, timeout=int(kwargs.get("timeout_seconds") or 7200))
+    parsed = _last_json(proc.stdout)
+    ok = proc.returncode == 0 and bool(parsed.get("ok"))
+    wrapped: dict[str, Any] = {
+        "ok": ok,
+        "status": parsed.get("status") or ("ok" if ok else "error"),
+        "items": int(parsed.get("items") or parsed.get("created") or 0),
+        "created": int(parsed.get("created") or parsed.get("items") or 0),
+        "source": str(kwargs.get("source") or "rqdb4ai"),
+        "returncode": proc.returncode,
+        "kurage_url": parsed.get("kurage_url") or "",
+        "reference_url": parsed.get("reference_url") or "",
+        "result": parsed,
+    }
+    if proc.stderr.strip():
+        wrapped["stderr"] = proc.stderr[-4000:]
+    if not ok:
+        raise RuntimeError(json.dumps(wrapped, ensure_ascii=False))
+    return wrapped
+
+
 def _load_kurage_geopolitics_module() -> Any:
     if str(KURAGE_WEB_BACKEND) not in sys.path:
         sys.path.insert(0, str(KURAGE_WEB_BACKEND))

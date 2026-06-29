@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
 """AI/Web3 monetization long-form video worker for Kurage Entertainment.
 
-This replaces the daily war/geopolitics OSINT long-form slot with a safer
+This replaces the daily war/geopolitics OSINT long-form slot with a
 business/technology niche: Web3, crypto, Codex, Claude Code, AI agents, SNS
 monetization, creator automation, OSS, and practical revenue systems.
 
-YouTube is used for trend/reference metadata only. Video footage is collected
-from license-explicit sources such as Wikimedia Commons, then transformed with
-Japanese narration, overlays, Kurage avatar, YouTube upload, entertainment.php
-publication, and AIxSNS announcement.
+Production publishing still uses license-explicit footage. The Kurage review
+mode can instead build a reference-analysis video from short excerpts of the
+source YouTube video or pages from a source PDF, so quality can be checked
+before any public YouTube upload path is enabled.
 """
 from __future__ import annotations
 
 import argparse
 import hashlib
+import html
 import json
 import os
 import random
@@ -260,6 +261,341 @@ def build_material_digest(footage: list[dict[str, Any]]) -> list[str]:
     return labels
 
 
+def reference_url(item: dict[str, Any]) -> str:
+    return str(item.get("url") or item.get("webpage_url") or item.get("source_url") or item.get("original_url") or "").strip()
+
+
+def is_pdf_url(url: str) -> bool:
+    return ".pdf" in urllib.parse.urlparse(url).path.lower() or url.lower().split("?", 1)[0].endswith(".pdf")
+
+
+def is_youtube_url(url: str) -> bool:
+    host = urllib.parse.urlparse(url).netloc.lower()
+    return "youtube.com" in host or "youtu.be" in host
+
+
+def is_web_article_url(url: str) -> bool:
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in {"http", "https"}:
+        return False
+    return not is_youtube_url(url) and not is_pdf_url(url)
+
+
+def source_score(item: dict[str, Any], topic: str = DEFAULT_TOPIC) -> int:
+    title = plain_text(item.get("title") or "", 240).lower()
+    description = plain_text(item.get("description") or "", 800).lower()
+    haystack = f"{title} {description}"
+    score = 0
+    views = int(item.get("view_count") or item.get("views") or 0)
+    duration = float(item.get("duration") or 0)
+    if views >= 1_000_000:
+        score += 50
+    elif views >= 300_000:
+        score += 35
+    elif views >= 100_000:
+        score += 25
+    elif views >= 30_000:
+        score += 12
+    if duration >= 3600:
+        score += 25
+    elif duration >= 1200:
+        score += 18
+    elif duration >= 600:
+        score += 10
+    for term, pts in {
+        "claude code": 18, "codex": 18, "ai automation": 16, "agentic": 14,
+        "make money": 16, "monetization": 16, "youtube automation": 16,
+        "web3": 12, "crypto": 10, "saas": 10, "build & sell": 16,
+        "vibe coding": 14, "no code": 8, "automation agency": 14,
+    }.items():
+        if term in haystack:
+            score += pts
+    if any(term in haystack for term in ("war", "ukraine", "russia", "military", "geopolitics", "osint")):
+        score -= 80
+    return score
+
+
+def command_output_json(cmd: list[str], *, cwd: Path | None = None, timeout: int = 600) -> dict[str, Any]:
+    proc = run(cmd, cwd=cwd, timeout=timeout)
+    if proc.returncode != 0:
+        raise RuntimeError((proc.stderr or proc.stdout or "command failed")[-1500:])
+    try:
+        return json.loads(proc.stdout)
+    except Exception as exc:
+        raise RuntimeError(f"failed to parse JSON from {' '.join(cmd[:2])}: {exc}") from exc
+
+
+def extract_json_object(text: str) -> dict[str, Any]:
+    text = text.strip()
+    text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.I)
+    text = re.sub(r"\s*```$", "", text)
+    try:
+        value = json.loads(text)
+        if isinstance(value, dict):
+            return value
+    except Exception:
+        pass
+    start = text.find("{")
+    end = text.rfind("}")
+    if start >= 0 and end > start:
+        value = json.loads(text[start:end + 1])
+        if isinstance(value, dict):
+            return value
+    raise ValueError("LLM response did not contain a JSON object")
+
+
+def ollama_generate_json(prompt: str, *, timeout: int = 420) -> dict[str, Any]:
+    ollama_url = os.environ.get("OLLAMA_URL", "http://192.168.0.14:11434/api/generate")
+    if not ollama_url.endswith("/api/generate"):
+        ollama_url = ollama_url.rstrip("/") + "/api/generate"
+    model = os.environ.get("OLLAMA_MODEL", "gemma4:12b-it-qat")
+    strengthened = (
+        "あなたはJSON APIです。内部思考、thoughtキー、説明文は禁止。"
+        "Markdownを使う場合もJSONオブジェクトだけにしてください。\n\n" + prompt
+    )
+    payload = json.dumps({"model": model, "prompt": strengthened, "stream": False}, ensure_ascii=False).encode("utf-8")
+    req = urllib.request.Request(ollama_url, data=payload, headers={"Content-Type": "application/json"}, method="POST")
+    with urllib.request.urlopen(req, timeout=timeout) as res:
+        data = json.loads(res.read().decode("utf-8", errors="replace") or "{}")
+    response = data.get("response") or ""
+    parsed = extract_json_object(response)
+    if set(parsed.keys()) == {"thought"}:
+        raise ValueError("LLM returned only thought, no usable JSON fields")
+    return parsed
+
+
+def fetch_youtube_metadata(url: str) -> dict[str, Any]:
+    data = command_output_json(["yt-dlp", "--dump-single-json", "--no-playlist", url], timeout=180)
+    return {
+        "kind": "youtube_reference",
+        "platform": "youtube",
+        "url": data.get("webpage_url") or url,
+        "source_url": data.get("webpage_url") or url,
+        "title": data.get("title") or "",
+        "description": data.get("description") or "",
+        "duration": data.get("duration") or 0,
+        "uploader": data.get("uploader") or data.get("channel") or "",
+        "view_count": data.get("view_count") or 0,
+        "candidate_id": slugify(data.get("webpage_url") or url, "ytref"),
+        "collected_at": now_jst(),
+    }
+
+
+def download_reference_youtube_video(url: str, work: Path) -> Path:
+    out_tmpl = str(work / "reference_video.%(ext)s")
+    cmd = [
+        "yt-dlp", "--no-playlist", "--no-warnings",
+        "-f", "bv*[height<=720][ext=mp4]+ba[ext=m4a]/b[height<=720][ext=mp4]/b[height<=720]",
+        "--merge-output-format", "mp4", "-o", out_tmpl, url,
+    ]
+    proc = run(cmd, timeout=1800)
+    if proc.returncode != 0:
+        raise RuntimeError("reference YouTube download failed: " + (proc.stderr or proc.stdout)[-1800:])
+    matches = sorted(work.glob("reference_video.*"), key=lambda p: p.stat().st_mtime, reverse=True)
+    matches = [m for m in matches if m.suffix.lower() in {".mp4", ".webm", ".mkv"} and m.stat().st_size > 1024 * 1024]
+    if not matches:
+        raise RuntimeError("reference YouTube download produced no usable video file")
+    return matches[0]
+
+
+def read_subtitle_text(path: Path) -> str:
+    raw = path.read_text(encoding="utf-8", errors="ignore")
+    lines: list[str] = []
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line or line.upper().startswith("WEBVTT") or "-->" in line or re.fullmatch(r"\d+", line):
+            continue
+        line = re.sub(r"<[^>]+>", "", line)
+        line = re.sub(r"\{[^}]+\}", "", line)
+        if line and line not in lines[-3:]:
+            lines.append(line)
+    return normalize_space(" ".join(lines))
+
+
+def fetch_youtube_transcript(url: str, work: Path) -> str:
+    subs_dir = work / "subs"
+    subs_dir.mkdir(parents=True, exist_ok=True)
+    out_tmpl = str(subs_dir / "ref.%(ext)s")
+    cmd = [
+        "yt-dlp", "--no-playlist", "--skip-download", "--write-auto-subs", "--write-subs",
+        "--sub-langs", "ja,en.*,en", "--convert-subs", "srt", "-o", out_tmpl, url,
+    ]
+    proc = run(cmd, timeout=240)
+    if proc.returncode != 0:
+        return ""
+    texts = []
+    for sub in sorted(subs_dir.glob("ref*.srt")) + sorted(subs_dir.glob("ref*.vtt")):
+        try:
+            text = read_subtitle_text(sub)
+        except Exception:
+            text = ""
+        if text:
+            texts.append(text)
+    return normalize_space(" ".join(texts))[:12000]
+
+
+def download_reference_pdf(url: str, work: Path) -> Path:
+    pdf = work / "reference.pdf"
+    geo.download_file(url, pdf, max_mb=80)
+    if pdf.stat().st_size < 1024:
+        raise RuntimeError("downloaded PDF is too small")
+    return pdf
+
+
+def extract_pdf_pages(pdf: Path, work: Path, max_pages: int = 10) -> list[Path]:
+    pages_dir = work / "pdf_pages"
+    pages_dir.mkdir(parents=True, exist_ok=True)
+    proc = run(["pdftoppm", "-jpeg", "-r", "150", "-f", "1", "-l", str(max_pages), str(pdf), str(pages_dir / "page")], timeout=300)
+    if proc.returncode != 0:
+        raise RuntimeError("PDF page extraction failed: " + proc.stderr[-1000:])
+    pages = sorted(pages_dir.glob("page-*.jpg"))
+    if not pages:
+        raise RuntimeError("PDF extraction produced no images")
+    return pages
+
+
+def make_image_clip(src: Path, out: Path, seconds: float, caption: str) -> Path:
+    out.parent.mkdir(parents=True, exist_ok=True)
+    overlay = geo.make_overlay_png(out.with_suffix(".overlay.png"), [caption[:120]], position="top")
+    vf = (
+        f"[0:v]scale={VIDEO_W}:{VIDEO_H}:force_original_aspect_ratio=decrease,"
+        f"pad={VIDEO_W}:{VIDEO_H}:(ow-iw)/2:(oh-ih)/2:color=white,setsar=1[base];"
+        "[base][1:v]overlay=0:0"
+    )
+    proc = run([
+        "ffmpeg", "-y", "-loop", "1", "-i", str(src), "-i", str(overlay), "-t", f"{seconds:.2f}",
+        "-an", "-filter_complex", vf, "-r", "24", "-c:v", "libx264", "-preset", "ultrafast",
+        "-crf", "27", "-pix_fmt", "yuv420p", str(out)
+    ], timeout=240)
+    if proc.returncode != 0 or not out.exists():
+        raise RuntimeError("image clip render failed: " + proc.stderr[-1000:])
+    return out
+
+
+def fetch_web_article_text(url: str) -> tuple[str, str]:
+    title = url
+    text = ""
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 KurageAgentReach/1.0"})
+        with urllib.request.urlopen(req, timeout=45) as res:
+            raw = res.read(3_000_000).decode("utf-8", errors="replace")
+        title_match = re.search(r"<title[^>]*>(.*?)</title>", raw, flags=re.I | re.S)
+        if title_match:
+            title = html.unescape(re.sub(r"\s+", " ", title_match.group(1))).strip()
+        raw = re.sub(r"<script[\s\S]*?</script>", " ", raw, flags=re.I)
+        raw = re.sub(r"<style[\s\S]*?</style>", " ", raw, flags=re.I)
+        body = re.sub(r"<[^>]+>", " ", raw)
+        text = html.unescape(re.sub(r"\s+", " ", body)).strip()
+    except Exception:
+        text = ""
+    if len(text) < 600:
+        try:
+            jina_url = "https://r.jina.ai/http://r.jina.ai/http"  # overwritten below; keeps linters quiet.
+            jina_url = "https://r.jina.ai/http://" + url.replace("https://", "").replace("http://", "")
+            req = urllib.request.Request(jina_url, headers={"User-Agent": "KurageAgentReach/1.0"})
+            with urllib.request.urlopen(req, timeout=60) as res:
+                jina = res.read(2_000_000).decode("utf-8", errors="replace")
+            if len(jina) > len(text):
+                text = normalize_space(jina)
+                m = re.search(r"^Title:\s*(.+)$", jina, flags=re.M)
+                if m:
+                    title = plain_text(m.group(1), 160)
+        except Exception:
+            pass
+    return title, plain_text(text, 12000)
+
+
+def capture_web_article_screenshots(url: str, work: Path, count: int = 6) -> list[Path]:
+    chrome = shutil.which("google-chrome") or shutil.which("chromium") or shutil.which("chromium-browser")
+    if not chrome:
+        raise RuntimeError("Chrome/Chromium is required to capture blog/article visuals")
+    shots: list[Path] = []
+    for idx in range(count):
+        out = work / "web_shots" / f"shot_{idx:02d}.png"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        scroll = idx * 850
+        js_url = "data:text/html," + urllib.parse.quote(
+            f"<html><body style='margin:0'><script>location.href={json.dumps(url)};</script></body></html>"
+        )
+        proc = run([
+            chrome, "--headless=new", "--disable-gpu", "--no-sandbox", "--disable-dev-shm-usage",
+            "--window-size=1280,1600", f"--screenshot={out}", js_url,
+        ], timeout=90)
+        if proc.returncode == 0 and out.exists() and out.stat().st_size > 20_000:
+            shots.append(out)
+            break
+    if not shots:
+        raise RuntimeError("failed to capture article screenshot")
+    return shots
+
+
+def build_web_article_materials(url: str, work: Path, target_seconds: float) -> tuple[list[Path], list[dict[str, Any]], str, str]:
+    title, text = fetch_web_article_text(url)
+    if len(text) < 600:
+        raise RuntimeError("web article text is too short; refusing generic script")
+    shots = capture_web_article_screenshots(url, work, count=4)
+    per = max(12.0, min(30.0, target_seconds / max(1, len(shots))))
+    clips = [make_image_clip(shot, work / "clips" / f"web_{idx:02d}.mp4", per, f"参考記事: {plain_text(title, 58)}") for idx, shot in enumerate(shots)]
+    material = {"kind": "web_article_reference", "title": title, "source_url": url, "description": text[:2600], "license": "review-required"}
+    return clips, [material], title, text
+
+
+def make_reference_video_clips(src: Path, work: Path, target_seconds: float, title: str) -> list[Path]:
+    duration = geo.ffprobe_duration(src)
+    if duration < 8:
+        raise RuntimeError(f"reference video is too short: {duration:.1f}s")
+    clip_count = max(4, min(14, int(target_seconds // 35) or 4))
+    per_clip = max(12.0, min(45.0, target_seconds / clip_count))
+    usable = max(1.0, duration - per_clip - 2.0)
+    if clip_count == 1:
+        starts = [0.0]
+    else:
+        starts = [min(usable, (usable / clip_count) * i + 2.0) for i in range(clip_count)]
+    clips: list[Path] = []
+    for idx, start in enumerate(starts):
+        tmp = work / "reference_clips" / f"raw_{idx:02d}.mp4"
+        tmp.parent.mkdir(parents=True, exist_ok=True)
+        proc = run([
+            "ffmpeg", "-y", "-ss", f"{start:.2f}", "-i", str(src), "-t", f"{per_clip:.2f}",
+            "-an", "-vf", f"scale={VIDEO_W}:{VIDEO_H}:force_original_aspect_ratio=increase,crop={VIDEO_W}:{VIDEO_H},setsar=1",
+            "-r", "24", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "28", "-pix_fmt", "yuv420p", str(tmp)
+        ], timeout=420)
+        if proc.returncode != 0 or not tmp.exists():
+            raise RuntimeError("reference clip extraction failed: " + proc.stderr[-1000:])
+        caption = f"参考元映像の抜粋: {plain_text(title, 58)}"
+        clips.append(prepare_clip(tmp, work / "clips" / f"clip_{idx:02d}.mp4", per_clip, caption))
+    return clips
+
+
+def build_reference_materials(url: str, work: Path, target_seconds: float) -> tuple[list[Path], list[dict[str, Any]], str, str]:
+    if is_pdf_url(url):
+        pdf = download_reference_pdf(url, work)
+        pages = extract_pdf_pages(pdf, work)
+        per = max(8.0, min(18.0, target_seconds / max(1, len(pages))))
+        clips = [make_image_clip(page, work / "clips" / f"pdf_{idx:02d}.mp4", per, "参考PDFページを読み解く") for idx, page in enumerate(pages)]
+        return clips, [{"kind": "pdf_reference", "title": pdf.name, "source_url": url, "license": "review-required"}], "参考PDF資料", ""
+    if is_web_article_url(url):
+        return build_web_article_materials(url, work, target_seconds)
+    if not is_youtube_url(url):
+        raise RuntimeError("reference visuals support YouTube URLs, PDF URLs, and blog/article URLs")
+    meta = fetch_youtube_metadata(url)
+    transcript = fetch_youtube_transcript(str(meta.get("url") or url), work)
+    video = download_reference_youtube_video(str(meta.get("url") or url), work)
+    clips = make_reference_video_clips(video, work, target_seconds, str(meta.get("title") or "参考動画"))
+    return clips, [meta], str(meta.get("title") or "参考動画"), transcript
+
+
+def concat_clips(clips: list[Path], out: Path) -> Path:
+    if not clips:
+        raise RuntimeError("no clips to concatenate")
+    concat = out.with_suffix(".txt")
+    concat.write_text("".join(f"file '{p}'\n" for p in clips), encoding="utf-8")
+    proc = run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(concat), "-c", "copy", str(out)], timeout=1200)
+    if proc.returncode != 0 or not out.exists():
+        raise RuntimeError("concat failed: " + proc.stderr[-1200:])
+    return out
+
+
 def clean_narration(text: str) -> str:
     text = plain_text(text)
     sentences = [s.strip() for s in re.split(r"(?<=[。！？])", text) if s.strip()]
@@ -319,6 +655,104 @@ def validate_summary_content(text: str) -> None:
         raise ValueError("summary contains a long raw English fragment")
 
 
+def repetition_score(text: str) -> float:
+    sentences = [normalize_space(s) for s in re.split(r"(?<=[。！？])", text) if len(normalize_space(s)) >= 12]
+    if not sentences:
+        return 1.0
+    counts: dict[str, int] = {}
+    for sentence in sentences:
+        key = re.sub(r"\s+", "", sentence)[:80]
+        counts[key] = counts.get(key, 0) + 1
+    repeated = sum(v - 1 for v in counts.values() if v > 1)
+    return repeated / max(1, len(sentences))
+
+
+def validate_reference_script(script: dict[str, Any], target_minutes: int) -> None:
+    narration = clean_narration(str(script.get("narration") or ""))
+    min_chars = max(900, int(target_minutes) * 240)
+    if len(narration) < min_chars:
+        raise ValueError(f"reference narration is too short: {len(narration)} < {min_chars}")
+    if repetition_score(narration) > 0.12:
+        raise ValueError("reference narration repeats the same sentences too often")
+    banned = [term for term in PRODUCTION_NOTE_TERMS if term in narration]
+    if banned:
+        raise ValueError(f"production notes leaked into narration: {banned[:3]}")
+    if re.search(r"[A-Za-z][A-Za-z0-9 .,/&()_-]{55,}", narration):
+        raise ValueError("narration contains a long raw English fragment")
+
+
+def generate_reference_script(topic: str, reference: dict[str, Any], transcript: str, target_minutes: int = 10) -> dict[str, Any]:
+    title = plain_text(reference.get("title") or topic, 160)
+    description = plain_text(reference.get("description") or "", 2600)
+    uploader = plain_text(reference.get("uploader") or "", 80)
+    transcript_excerpt = plain_text(transcript, 9000)
+    if not transcript_excerpt and not description:
+        raise RuntimeError("reference source has no transcript or description; refusing to create a generic video")
+    prompt = f"""
+あなたは日本語のビジネス/技術解説動画の構成作家です。
+元になる参照素材を忠実に読み解き、10分前後の日本語解説台本にしてください。
+
+テーマ: {topic}
+参照元タイトル: {title}
+参照元チャンネル/著者: {uploader}
+参照元概要:
+{description}
+参照元字幕または本文抜粋:
+{transcript_excerpt}
+
+必ず守ること:
+- 参照元の要点、数字、手順、ノウハウ、条件、リスクを具体的に整理する。
+- 当たり障りない一般論に薄めない。参照元にないことを断定しない。
+- URLや英語タイトルをアルファベットで読み上げない。必要なら日本語で意味だけ説明する。
+- 「素材」「ライセンス」「この動画では」など制作上の注意事項をナレーションに入れない。
+- 同じ説明を繰り返さない。章ごとに役割を変える。
+- 日本語の自然な話し言葉にする。
+- 出力はJSONだけ。title, summary, narration, chapters, source_takeaways を持つ。
+
+構成の目安:
+1. 何がバズっている/注目されているのか
+2. 収益化や事業化の核心
+3. 実行手順
+4. 失敗しやすい点
+5. Kurage/AI/OSSで応用するならどう作るか
+6. まとめ
+""".strip()
+    parsed = ollama_generate_json(prompt, timeout=520)
+    parsed["title"] = plain_text(parsed.get("title") or title, 76)
+    parsed["summary"] = plain_text(parsed.get("summary") or f"参照素材「{title}」の要点を日本語で整理します。", 180)
+    parsed["narration"] = clean_narration(str(parsed.get("narration") or ""))
+    validate_reference_script(parsed, target_minutes)
+    return parsed
+
+
+def build_reference_video(topic: str, script: dict[str, Any], clips: list[Path], work: Path, target_minutes: int = 10) -> Path:
+    narration = normalize_space(script.get("narration") or script.get("summary") or topic)
+    audio = geo.synthesize_tts(narration, work / "narration.mp3")
+    audio_duration = geo.ffprobe_duration(audio)
+    bg = concat_clips(clips, work / "reference_background.mp4")
+    bg_duration = geo.ffprobe_duration(bg)
+    if bg_duration < audio_duration + 2:
+        looped = work / "reference_background_looped.mp4"
+        loops = max(1, int((audio_duration + 4) // max(1, bg_duration)) + 1)
+        repeated = clips * loops
+        bg = concat_clips(repeated, looped)
+    title = normalize_space(script.get("title") or topic)[:70]
+    subtitle = "参照元の画面抜粋をもとに、収益化の要点を日本語で整理"
+    overlay = geo.make_overlay_png(work / "final_overlay.png", [title, subtitle], position="bottom")
+    out_raw = work / "reference_monetization.raw.mp4"
+    proc = run([
+        "ffmpeg", "-y", "-i", str(bg), "-i", str(audio), "-i", str(overlay), "-shortest",
+        "-filter_complex", "[0:v][2:v]overlay=0:0[v]", "-map", "[v]", "-map", "1:a",
+        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "27", "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-b:a", "160k", "-movflags", "+faststart", str(out_raw),
+    ], timeout=3600)
+    if proc.returncode != 0 or not out_raw.exists():
+        raise RuntimeError("reference final render failed: " + proc.stderr[-1200:])
+    out = work / "reference_monetization.mp4"
+    geo.apply_vtuber_avatar_overlay(out_raw, out)
+    return out
+
+
 def generate_script(topic: str, references: list[dict[str, Any]], target_minutes: int = 10, footage: list[dict[str, Any]] | None = None, profile: dict[str, Any] | None = None) -> dict[str, Any]:
     footage = footage or []
     profile = profile or {}
@@ -344,16 +778,8 @@ def generate_script(topic: str, references: list[dict[str, Any]], target_minutes
 - 構成は、{chapters_text}。章ごとに具体例を入れる。
 - JSONだけで返す。title, summary, narration, chapters を持つ。
 """.strip()
-    ollama_url = os.environ.get("OLLAMA_URL", "http://192.168.0.14:11434/api/generate")
-    if not ollama_url.endswith("/api/generate"):
-        ollama_url = ollama_url.rstrip("/") + "/api/generate"
-    model = os.environ.get("OLLAMA_MODEL", "gemma4:12b-it-qat")
     try:
-        payload = json.dumps({"model": model, "prompt": prompt, "stream": False, "format": "json"}, ensure_ascii=False).encode("utf-8")
-        req = urllib.request.Request(ollama_url, data=payload, headers={"Content-Type": "application/json"}, method="POST")
-        with urllib.request.urlopen(req, timeout=300) as res:
-            data = json.loads(res.read().decode("utf-8", errors="replace") or "{}")
-        parsed = json.loads(data.get("response") or "{}")
+        parsed = ollama_generate_json(prompt, timeout=420)
         if parsed.get("title") and parsed.get("narration"):
             narration = ensure_narration_length(str(parsed.get("narration") or ""), topic, target_minutes)
             validate_narration_content(narration)
@@ -568,6 +994,118 @@ def sync_public_json() -> dict[str, Any]:
     return geo.sync_public_json()
 
 
+def register_ai_monetization_kurage_video(video: Path, script: dict[str, Any], topic: str, materials: list[dict[str, Any]], work: Path) -> dict[str, Any]:
+    result = geo.register_kurage_video_job(video, script, topic, materials, work)
+    job_file = Path(str(result.get("job_file") or ""))
+    if job_file.exists():
+        job = read_json(job_file, {})
+        job.update({
+            "source": "ai_monetization_reference",
+            "content_type": "ai_monetization_reference_long_test",
+            "tweet_url": materials[0].get("source_url") if materials else "",
+            "source_url": materials[0].get("source_url") if materials else "",
+            "tweet_author": "Kurage AgentReach",
+            "tweet_author_name": "Kurage AgentReach",
+            "display_title": plain_text(script.get("title") or topic, 90),
+            "geopolitics_test": False,
+            "ai_monetization_reference_test": True,
+            "source_materials": [
+                {
+                    "label": plain_text(item.get("kind") or "reference", 40),
+                    "title": plain_text(item.get("title"), 160),
+                    "source_url": item.get("source_url") or item.get("url"),
+                    "license": item.get("license") or "review-required",
+                    "artist": plain_text(item.get("uploader") or item.get("artist") or item.get("credit") or "", 120),
+                }
+                for item in materials[:12]
+            ],
+        })
+        write_json(job_file, job)
+    return result
+
+
+def select_reference_candidate(candidates: list[dict[str, Any]], force_url: str = "", topic: str = DEFAULT_TOPIC) -> dict[str, Any]:
+    if force_url:
+        if is_youtube_url(force_url):
+            return fetch_youtube_metadata(force_url)
+        return {"kind": "pdf_reference" if is_pdf_url(force_url) else "web_article_reference", "url": force_url, "source_url": force_url, "title": force_url, "candidate_id": slugify(force_url, "ref")}
+    refs = [c for c in candidates if c.get("kind") == "youtube_reference" and reference_url(c)]
+    if not refs:
+        raise RuntimeError("no reference candidates found; run collect or pass --force-url")
+    refs.sort(key=lambda x: source_score(x, topic), reverse=True)
+    best = refs[0]
+    if source_score(best, topic) <= 0:
+        raise RuntimeError("no suitable AI/Web3/Codex/SNS monetization reference candidate found")
+    return best
+
+
+def produce_kurage_reference_test_video_job(
+    topic: str = DEFAULT_TOPIC,
+    target_minutes: int = 10,
+    force_url: str = "",
+    target_count: int = 24,
+    **_: Any,
+) -> dict[str, Any]:
+    geo.load_env_file(Path(os.environ.get("AIXEC_ENV_FILE", "/home/kojima/work/aixec/.env")))
+    profile = select_topic_profile(topic)
+    topic = str(profile.get("topic") or topic or DEFAULT_TOPIC)
+    collect: dict[str, Any] = {"skipped": bool(force_url)}
+    if not force_url:
+        collect = collect_sources_job(
+            target_count=target_count,
+            query=str(profile.get("query") or DEFAULT_QUERY),
+            categories=[str(item) for item in (profile.get("categories") or DEFAULT_COMMONS_CATEGORIES)],
+            profile_id=str(profile.get("id") or ""),
+        )
+    candidates = read_json(CANDIDATES_PATH, [])
+    reference = select_reference_candidate(candidates, force_url=force_url, topic=topic)
+    url = reference_url(reference)
+    if not url:
+        raise RuntimeError("selected reference has no URL")
+    job_id = slugify(topic + url + iso_now(), "aimon-ref")
+    work = WORK_DIR / job_id
+    work.mkdir(parents=True, exist_ok=True)
+    requested_seconds = max(60.0, float(target_minutes) * 60.0)
+    clips, materials, source_title, transcript = build_reference_materials(url, work, requested_seconds)
+    if materials and reference.get("description") and not materials[0].get("description"):
+        materials[0]["description"] = reference.get("description")
+    if materials and reference.get("uploader") and not materials[0].get("uploader"):
+        materials[0]["uploader"] = reference.get("uploader")
+    script = generate_reference_script(topic, materials[0] if materials else reference, transcript, target_minutes=target_minutes)
+    video = build_reference_video(topic, script, clips, work, target_minutes=target_minutes)
+    write_json(work / "script.json", script)
+    write_json(work / "reference.json", {"url": url, "source_title": source_title, "materials": materials, "transcript_chars": len(transcript)})
+    reg = register_ai_monetization_kurage_video(video, script, topic, materials, work)
+    state = read_json(STATE_PATH, {"runs": []})
+    record = {
+        "job_id": job_id,
+        "profile_id": profile.get("id") or "",
+        "topic": topic,
+        "created_at": now_jst(),
+        "video": str(video),
+        "kurage_url": reg.get("kurage_url"),
+        "reference_url": url,
+        "source": "kurage_reference_test",
+    }
+    state.setdefault("runs", []).insert(0, record)
+    write_json(STATE_PATH, state)
+    return {
+        "ok": True,
+        "status": "ok",
+        "items": 1,
+        "created": 1,
+        "profile_id": profile.get("id") or "",
+        "topic": topic,
+        "collect": collect,
+        "reference_url": url,
+        "source_title": source_title,
+        "kurage_url": reg.get("kurage_url"),
+        "job_file": reg.get("job_file"),
+        "video_file": reg.get("video_file"),
+        "work_dir": str(work),
+    }
+
+
 def produce_daily_video_job(topic: str = DEFAULT_TOPIC, target_minutes: int = 10, source: str = "worker_auto", force_run: bool = False, **_: Any) -> dict[str, Any]:
     geo.load_env_file(Path(os.environ.get("AIXEC_ENV_FILE", "/home/kojima/work/aixec/.env")))
     profile = select_topic_profile(topic)
@@ -627,12 +1165,13 @@ def produce_daily_video_job(topic: str = DEFAULT_TOPIC, target_minutes: int = 10
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Kurage AI/Web3 monetization long-form video worker")
-    parser.add_argument("command", choices=["collect", "run"], nargs="?", default="collect")
+    parser.add_argument("command", choices=["collect", "run", "test-kurage"], nargs="?", default="collect")
     parser.add_argument("--topic", default=DEFAULT_TOPIC)
     parser.add_argument("--target-minutes", type=int, default=10)
     parser.add_argument("--target-count", type=int, default=24)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--force-run", action="store_true")
+    parser.add_argument("--force-url", default="", help="YouTube or PDF URL to use as the reference visual source in test-kurage mode")
     args = parser.parse_args()
     profile = select_topic_profile(args.topic)
     if args.command == "collect" or args.dry_run:
@@ -643,6 +1182,14 @@ def main() -> None:
             profile_id=str(profile.get("id") or ""),
         )
         print(json.dumps(result, ensure_ascii=False, indent=2))
+        return
+    if args.command == "test-kurage":
+        print(json.dumps(produce_kurage_reference_test_video_job(
+            topic=args.topic,
+            target_minutes=args.target_minutes,
+            force_url=args.force_url,
+            target_count=args.target_count,
+        ), ensure_ascii=False, indent=2))
         return
     print(json.dumps(produce_daily_video_job(topic=args.topic, target_minutes=args.target_minutes, force_run=args.force_run), ensure_ascii=False, indent=2))
 
