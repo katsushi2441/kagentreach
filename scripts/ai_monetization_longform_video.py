@@ -825,80 +825,88 @@ def generate_reference_script(topic: str, reference: dict[str, Any], transcript:
     return parsed
 
 
-def ass_time(seconds: float) -> str:
+KURAGEVP_BACKEND = Path(os.environ.get("KURAGEVP_BACKEND", "/home/kojima/work/kuragevp/backend"))
+KURAGEVP_PYTHON = os.environ.get("KURAGEVP_PYTHON", "/home/kojima/work/kuragevp/.venv/bin/python")
+
+
+def srt_time(seconds: float) -> str:
     seconds = max(0.0, seconds)
     h = int(seconds // 3600)
     m = int((seconds % 3600) // 60)
     s = int(seconds % 60)
-    cs = int(round((seconds - int(seconds)) * 100))
-    if cs >= 100:
+    ms = int(round((seconds - int(seconds)) * 1000))
+    if ms >= 1000:
         s += 1
-        cs -= 100
-    return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
+        ms -= 1000
+    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
 
-def ass_escape(text: str) -> str:
-    return text.replace("\\", "\\\\").replace("{", "（").replace("}", "）").replace("\n", " ")
-
-
-def split_caption_text(text: str, max_chars: int = 34) -> list[str]:
-    text = clean_narration(text)
-    sentences = [s for s in re.split(r"(?<=[。！？])", text) if s.strip()]
-    chunks: list[str] = []
-    current = ""
-    for sentence in sentences:
-        sentence = normalize_space(sentence)
-        if not sentence:
-            continue
-        if len(sentence) > max_chars * 2:
-            for i in range(0, len(sentence), max_chars * 2):
-                part = sentence[i:i + max_chars * 2]
-                if current:
-                    chunks.append(current)
-                    current = ""
-                chunks.append(part)
-            continue
-        if current and len(current) + len(sentence) > max_chars * 2:
-            chunks.append(current)
-            current = sentence
-        else:
-            current += sentence
-    if current:
-        chunks.append(current)
-    return [c for c in chunks if c.strip()]
-
-
-def two_line_caption(text: str, max_line_chars: int = 34) -> str:
-    text = normalize_space(text)
-    if len(text) <= max_line_chars:
-        return ass_escape(text)
-    start = max(1, len(text) // 2 - 8)
-    stop = min(len(text) - 1, len(text) // 2 + 9)
-    split_at = min(range(start, stop), key=lambda i: abs(i - len(text) / 2)) if stop > start else len(text) // 2
-    first = text[:split_at]
-    second = text[split_at:]
-    return ass_escape(first) + r"\N" + ass_escape(second)
-
-
-def make_caption_schedule(narration: str, duration: float) -> list[dict[str, Any]]:
-    chunks = split_caption_text(narration)
-    if not chunks:
-        raise RuntimeError("no narration chunks for subtitles")
-    total_chars = max(1, sum(len(c) for c in chunks))
+def make_reference_srt(narration: str, duration: float, out: Path) -> Path:
+    text = clean_narration(narration)
+    sentences = [normalize_space(s) for s in re.split(r"(?<=[。！？])", text) if normalize_space(s)]
+    if not sentences:
+        raise RuntimeError("no narration sentences for subtitles")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    total_chars = max(1, sum(len(s) for s in sentences))
     cursor = 0.35
     usable = max(1.0, duration - 0.7)
-    events: list[dict[str, Any]] = []
-    for idx, chunk in enumerate(chunks):
-        share = len(chunk) / total_chars
-        seg = max(2.0, min(7.0, usable * share))
-        if idx == len(chunks) - 1:
-            end = max(cursor + 1.5, duration - 0.25)
-        else:
-            end = min(duration - 0.25, cursor + seg)
+    lines: list[str] = []
+    for idx, sentence in enumerate(sentences, start=1):
+        seg = max(1.2, min(8.0, usable * (len(sentence) / total_chars)))
+        end = duration - 0.25 if idx == len(sentences) else min(duration - 0.25, cursor + seg)
         if end <= cursor:
-            break
-        events.append({"start": cursor, "end": end, "text": chunk})
+            end = min(duration - 0.25, cursor + 1.2)
+        lines.append(f"{idx}\n{srt_time(cursor)} --> {srt_time(end)}\n{sentence}\n")
         cursor = end
+    out.write_text("\n".join(lines), encoding="utf-8")
+    return out
+
+
+def make_kurage_ass_with_voicepro(source_srt: Path, out_dir: Path, duration: float) -> Path:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    code = """
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import pipeline
+ass = pipeline.make_kurage_ass(
+    Path(sys.argv[2]),
+    Path(sys.argv[3]),
+    target_duration=float(sys.argv[4]),
+    cjk_line_chars=30,
+    latin_line_chars=34,
+)
+print(ass)
+""".strip()
+    proc = run([KURAGEVP_PYTHON, "-c", code, str(KURAGEVP_BACKEND), str(source_srt), str(out_dir), f"{duration:.3f}"], timeout=300)
+    if proc.returncode != 0:
+        raise RuntimeError("Kurage Voice Pro subtitle generation failed: " + (proc.stderr or proc.stdout)[-1600:])
+    ass = out_dir / "translated.kurage.ass"
+    if not ass.exists():
+        raise RuntimeError("Kurage Voice Pro subtitle generation did not create ASS")
+    return ass
+
+
+def parse_kurage_ass_events(ass: Path) -> list[dict[str, Any]]:
+    def parse_time(value: str) -> float:
+        h, m, rest = value.split(":")
+        s, cs = rest.split(".")
+        return int(h) * 3600 + int(m) * 60 + int(s) + int(cs) / 100.0
+
+    events: list[dict[str, Any]] = []
+    for line in ass.read_text(encoding="utf-8", errors="ignore").splitlines():
+        if not line.startswith("Dialogue:"):
+            continue
+        parts = line.split(",", 9)
+        if len(parts) < 10:
+            continue
+        text = re.sub(r"\{[^}]*\}", "", parts[9]).replace(r"\N", "\n")
+        text = normalize_space(text.replace("\n", " / ")).replace(" / ", "\n")
+        if not text:
+            continue
+        events.append({"start": parse_time(parts[1]), "end": parse_time(parts[2]), "text": text})
+    if not events:
+        raise RuntimeError("Kurage ASS contained no subtitle events")
     return events
 
 
@@ -915,26 +923,18 @@ def draw_caption_overlay(text: str, out: Path) -> Path:
     image = Image.new("RGBA", (VIDEO_W, VIDEO_H), (0, 0, 0, 0))
     draw = ImageDraw.Draw(image)
     font = caption_font(34)
-    line_font = font
-    max_chars = 34
-    clean = normalize_space(text)
-    if len(clean) <= max_chars:
-        lines = [clean]
-    else:
-        start = max(1, len(clean) // 2 - 8)
-        stop = min(len(clean) - 1, len(clean) // 2 + 9)
-        split_at = min(range(start, stop), key=lambda i: abs(i - len(clean) / 2)) if stop > start else len(clean) // 2
-        lines = [clean[:split_at], clean[split_at:]]
+    lines = [normalize_space(line) for line in str(text).split("\n") if normalize_space(line)]
+    lines = lines[:2] or [normalize_space(str(text))]
     box_x1, box_y1, box_x2, box_y2 = 54, 430, 1018, 548
     draw.rounded_rectangle((box_x1, box_y1, box_x2, box_y2), radius=20, fill=(0, 0, 0, 176), outline=(255, 255, 255, 90), width=2)
     line_h = 42
     total_h = line_h * len(lines)
     y = box_y1 + (box_y2 - box_y1 - total_h) // 2 - 2
     for line in lines:
-        bbox = draw.textbbox((0, 0), line, font=line_font, stroke_width=2)
+        bbox = draw.textbbox((0, 0), line, font=font, stroke_width=2)
         w = bbox[2] - bbox[0]
         x = box_x1 + (box_x2 - box_x1 - w) // 2
-        draw.text((x, y), line, font=line_font, fill=(255, 255, 255, 255), stroke_width=2, stroke_fill=(0, 0, 0, 230))
+        draw.text((x, y), line, font=font, fill=(255, 255, 255, 255), stroke_width=2, stroke_fill=(0, 0, 0, 230))
         y += line_h
     image.save(out)
     return out
@@ -965,15 +965,17 @@ def render_video_segment(src: Path, out: Path, start: float, end: float, overlay
 
 def burn_subtitles(video: Path, narration: str, out: Path, duration: float | None = None) -> Path:
     duration = duration or geo.ffprobe_duration(video)
-    schedule = make_caption_schedule(narration, duration)
     work_dir = out.with_suffix("")
     work_dir.mkdir(parents=True, exist_ok=True)
+    source_srt = make_reference_srt(narration, duration, work_dir / "source.srt")
+    ass = make_kurage_ass_with_voicepro(source_srt, work_dir, duration)
+    schedule = parse_kurage_ass_events(ass)
     segments: list[Path] = []
     cursor = 0.0
     seg_index = 0
     for idx, item in enumerate(schedule):
-        start = float(item["start"])
-        end = min(float(item["end"]), duration)
+        start = min(max(float(item["start"]), 0.0), duration)
+        end = min(max(float(item["end"]), start + 0.05), duration)
         if start > cursor + 0.05:
             seg = work_dir / f"segment_{seg_index:03d}.mp4"
             render_video_segment(video, seg, cursor, start)
