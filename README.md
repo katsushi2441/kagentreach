@@ -28,6 +28,31 @@ Use the helper below to search X without extracting or printing cookies. It reus
 
 The helper saves/prints summarized search results. If browser-use cannot return strict JSON, the raw result is preserved so downstream jobs can still inspect it.
 
+## News Opinion Research
+
+`scripts/news-opinion-research.py` is the reusable research helper for
+Kurage Montage News. Given a news URL/title/query, it collects public reaction
+signals from:
+
+- Web/Blog search through Agent Reach / Exa via `mcporter`
+- YouTube search through `yt-dlp`
+- X search through `scripts/x-search-browser-use.py` when an authenticated
+  browser profile is available
+
+Example:
+
+```bash
+python3 scripts/news-opinion-research.py \
+  --url 'https://example.com/news' \
+  --title 'Example news title' \
+  --limit 8 \
+  --out /tmp/news-opinions.json
+```
+
+The output is JSON with `sources`, `opinion_points`, and `errors`. Missing X or
+Web access is recorded as an error; downstream products must not invent
+reactions that were not collected.
+
 ## Daily Monetization Video Digest
 
 `scripts/monetization_daily.py` runs the application-specific workflow. In
