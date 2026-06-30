@@ -53,6 +53,41 @@ The output is JSON with `sources`, `opinion_points`, and `errors`. Missing X or
 Web access is recorded as an error; downstream products must not invent
 reactions that were not collected.
 
+## YahooNewsTopics To Kurage Montage News
+
+`scripts/yahoo-news-topics-watch.py` watches Yahoo News Topics for Kurage
+Montage News. The production scope is intentionally limited to politics,
+economy, and IT:
+
+- politics: Yahoo domestic RSS, filtered by policy/election/government keywords
+- economy: Yahoo business RSS
+- IT: Yahoo IT RSS
+
+The stable path is Yahoo News RSS because X authentication can expire or be
+rate-limited. `@YahooNewsTopics` through twitter-cli is supported as an optional
+supplement, but the worker must continue through RSS when X is unavailable.
+
+For each selected item, the watcher resolves the Yahoo pickup URL to the real
+article URL, converts it to the `/comments` URL, checks the local processed
+state, and enqueues `kmontage` with `mode=news_opinions`.
+
+Dry run:
+
+```bash
+python3 scripts/yahoo-news-topics-watch.py --dry-run --categories politics,economy,it
+```
+
+RQDB4AI entrypoint:
+
+```text
+kagentreach_jobs.watch_yahoo_news_topics_for_kmontage_job
+```
+
+Production scheduling is owned by kdeck goal
+`kagentreach-yahoo-news-topics-kmontage`. It checks at most every 15 minutes,
+enqueues at most one new Kurage Montage News video per run, and stores processed
+article URLs in `data/yahoo_news_topics_state.json` to avoid duplicates.
+
 ## Daily Monetization Video Digest
 
 `scripts/monetization_daily.py` runs the application-specific workflow. In

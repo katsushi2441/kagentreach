@@ -161,6 +161,62 @@ upload to YouTube.
     return wrapped
 
 
+def watch_yahoo_news_topics_for_kmontage_job(
+    dry_run: bool = False,
+    categories: str = "politics,economy,it",
+    max_enqueue: int = 1,
+    limit_per_category: int = 6,
+    include_x: bool = False,
+    force: bool = False,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """Watch YahooNewsTopics/Yahoo RSS and enqueue kmontagenews videos.
+
+    The stable path is Yahoo News RSS categories narrowed to politics,
+    economy, and IT. X @YahooNewsTopics is optional because twitter-cli may
+    require authenticated cookies; when unavailable the RSS path still works.
+    """
+    cmd = [
+        sys.executable,
+        str(ROOT / "scripts" / "yahoo-news-topics-watch.py"),
+        "--categories",
+        str(categories or kwargs.get("categories") or "politics,economy,it"),
+        "--max-enqueue",
+        str(int(max_enqueue or kwargs.get("max_enqueue") or 1)),
+        "--limit-per-category",
+        str(int(limit_per_category or kwargs.get("limit_per_category") or 6)),
+    ]
+    if dry_run:
+        cmd.append("--dry-run")
+    if include_x or kwargs.get("include_x"):
+        cmd.append("--include-x")
+    if force or kwargs.get("force"):
+        cmd.append("--force")
+
+    proc = subprocess.run(cmd, cwd=str(ROOT), text=True, capture_output=True, timeout=int(kwargs.get("timeout_seconds") or 1800))
+    parsed = _last_json(proc.stdout)
+    ok = proc.returncode == 0 and bool(parsed.get("ok", dry_run))
+    items = int(parsed.get("checked") or 0)
+    wrapped: dict[str, Any] = {
+        "ok": ok,
+        "status": parsed.get("status") or ("ok" if ok else "error"),
+        "items": items,
+        "created": int(parsed.get("created") or 0),
+        "enqueued": int(parsed.get("items") or 0),
+        "checked": items,
+        "dry_run": dry_run,
+        "source": str(kwargs.get("source") or "rqdb4ai"),
+        "returncode": proc.returncode,
+        "categories": str(categories or kwargs.get("categories") or "politics,economy,it"),
+        "result": parsed,
+    }
+    if proc.stderr.strip():
+        wrapped["stderr"] = proc.stderr[-4000:]
+    if not ok:
+        raise RuntimeError(json.dumps(wrapped, ensure_ascii=False))
+    return wrapped
+
+
 def _load_kurage_geopolitics_module() -> Any:
     if str(KURAGE_WEB_BACKEND) not in sys.path:
         sys.path.insert(0, str(KURAGE_WEB_BACKEND))
