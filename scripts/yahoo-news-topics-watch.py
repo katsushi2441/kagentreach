@@ -99,6 +99,30 @@ def comments_url_for_article(article_url: str) -> str:
     return base if base.endswith("/comments") else base + "/comments"
 
 
+def estimate_yahoo_comment_count(comments_url: str, timeout: int = 20) -> tuple[int, str]:
+    """Return visible Yahoo comment count; low-count pages are poor video sources."""
+    try:
+        html = fetch_text(comments_url, timeout=timeout)
+    except Exception as exc:
+        return 0, f"comment_count_fetch_failed: {exc}"
+    text = html
+    if BeautifulSoup is not None:
+        try:
+            soup = BeautifulSoup(html, "html.parser")
+            text = soup.get_text(" ", strip=True)
+        except Exception:
+            text = html
+    counts = []
+    for pattern in (r"コメント\s*([0-9,]+)\s*件", r"([0-9,]+)\s*件\s*/\s*([0-9,]+)\s*件"):
+        for match in re.finditer(pattern, text):
+            nums = [int(n.replace(",", "")) for n in match.groups() if n]
+            if nums:
+                counts.append(max(nums))
+    if counts:
+        return max(counts), ""
+    return 0, "comment_count_not_found"
+
+
 def category_allowed(category: str, title: str, url: str) -> bool:
     if category in {"economy", "it"}:
         return True
@@ -259,6 +283,7 @@ def run_watch(
     categories: list[str],
     max_enqueue: int,
     limit_per_category: int,
+    min_comments: int,
     include_x: bool,
     dry_run: bool,
     force: bool,
@@ -273,10 +298,19 @@ def run_watch(
     candidates = dedupe_candidates([*rss_candidates, *x_candidates])
     selected: list[Candidate] = []
     skipped_processed = 0
+    skipped_low_comments: list[dict[str, Any]] = []
     for candidate in candidates:
         key = normalize_url(candidate.article_url)
         if not force and key in processed:
             skipped_processed += 1
+            continue
+        comment_count, comment_error = estimate_yahoo_comment_count(candidate.comments_url)
+        if not force and comment_count < min_comments:
+            skipped_low_comments.append({
+                **asdict(candidate),
+                "comment_count": comment_count,
+                "reason": comment_error or f"comment_count_below_{min_comments}",
+            })
             continue
         selected.append(candidate)
         if len(selected) >= max_enqueue:
@@ -308,6 +342,9 @@ def run_watch(
         "candidate_count": len(candidates),
         "selected_count": len(selected),
         "skipped_processed": skipped_processed,
+        "skipped_low_comments_count": len(skipped_low_comments),
+        "skipped_low_comments": skipped_low_comments[:10],
+        "min_comments": min_comments,
         "categories": categories,
         "include_x": include_x,
         "dry_run": dry_run,
@@ -325,6 +362,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--categories", default="politics,economy,it", help="Comma-separated: politics,economy,it")
     parser.add_argument("--max-enqueue", type=int, default=1)
     parser.add_argument("--limit-per-category", type=int, default=6)
+    parser.add_argument("--min-comments", type=int, default=5, help="Skip Yahoo comment pages with fewer visible comments.")
     parser.add_argument("--include-x", action="store_true", help="Also inspect @YahooNewsTopics through twitter-cli when authenticated.")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--force", action="store_true", help="Ignore processed URL state.")
@@ -339,6 +377,7 @@ def main() -> int:
         categories=categories,
         max_enqueue=max(1, args.max_enqueue),
         limit_per_category=max(1, args.limit_per_category),
+        min_comments=max(0, args.min_comments),
         include_x=bool(args.include_x),
         dry_run=bool(args.dry_run),
         force=bool(args.force),

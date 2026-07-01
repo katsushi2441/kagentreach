@@ -166,6 +166,7 @@ def watch_yahoo_news_topics_for_kmontage_job(
     categories: str = "politics,economy,it",
     max_enqueue: int = 1,
     limit_per_category: int = 6,
+    min_comments: int = 5,
     include_x: bool = False,
     force: bool = False,
     **kwargs: Any,
@@ -185,6 +186,8 @@ def watch_yahoo_news_topics_for_kmontage_job(
         str(int(max_enqueue or kwargs.get("max_enqueue") or 1)),
         "--limit-per-category",
         str(int(limit_per_category or kwargs.get("limit_per_category") or 6)),
+        "--min-comments",
+        str(int(min_comments or kwargs.get("min_comments") or 5)),
     ]
     if dry_run:
         cmd.append("--dry-run")
