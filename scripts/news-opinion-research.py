@@ -26,6 +26,10 @@ from urllib.request import Request, urlopen
 ROOT = Path(__file__).resolve().parents[1]
 WORK_ROOT = Path(os.environ.get("KURAGE_WORK_ROOT", "/home/kojima/work"))
 X_SEARCH_SCRIPT = ROOT / "scripts" / "x-search-browser-use.py"
+X_SEARCH_PYTHON = Path(os.environ.get(
+    "KAGENTREACH_X_SEARCH_PYTHON",
+    "/home/kojima/work/browser_agent/.venv/bin/python",
+))
 DEFAULT_X_COOKIE_FILE = Path(os.environ.get(
     "KAGENTREACH_X_COOKIE_FILE",
     "/home/kojima/work/browser_agent/chrome-profile/Default/Cookies",
@@ -397,9 +401,10 @@ def search_youtube(query: str, limit: int) -> tuple[list[dict[str, Any]], str]:
 def search_x(query: str, limit: int, mode: str) -> tuple[list[dict[str, Any]], str]:
     if not X_SEARCH_SCRIPT.exists():
         return [], f"X search script not found: {X_SEARCH_SCRIPT}"
+    py = X_SEARCH_PYTHON if X_SEARCH_PYTHON.exists() else Path(sys.executable)
     out = Path(tempfile.mkdtemp(prefix="kagentreach-x-")) / "x.json"
     try:
-        proc = run([sys.executable, str(X_SEARCH_SCRIPT), query, "-n", str(limit), "--mode", mode, "--json-out", str(out)], timeout=900, cwd=ROOT)
+        proc = run([str(py), str(X_SEARCH_SCRIPT), query, "-n", str(limit), "--mode", mode, "--json-out", str(out)], timeout=900, cwd=ROOT)
     except Exception as exc:
         return [], str(exc)
     if out.exists():
@@ -407,6 +412,14 @@ def search_x(query: str, limit: int, mode: str) -> tuple[list[dict[str, Any]], s
             data = json.loads(out.read_text(encoding="utf-8"))
             if data.get("ok") and isinstance(data.get("results"), list):
                 return data["results"][:limit], ""
+            raw = data.get("raw")
+            if data.get("ok") and isinstance(raw, str):
+                try:
+                    nested = json.loads(raw)
+                    if isinstance(nested, dict) and nested.get("ok") and isinstance(nested.get("results"), list):
+                        return nested["results"][:limit], ""
+                except Exception:
+                    pass
             return [], clean_text(json.dumps(data, ensure_ascii=False), 1000)
         except Exception:
             pass
