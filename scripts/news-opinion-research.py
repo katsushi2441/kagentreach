@@ -26,6 +26,14 @@ from urllib.request import Request, urlopen
 ROOT = Path(__file__).resolve().parents[1]
 WORK_ROOT = Path(os.environ.get("KURAGE_WORK_ROOT", "/home/kojima/work"))
 X_SEARCH_SCRIPT = ROOT / "scripts" / "x-search-browser-use.py"
+DEFAULT_X_COOKIE_FILE = Path(os.environ.get(
+    "KAGENTREACH_X_COOKIE_FILE",
+    "/home/kojima/work/browser_agent/chrome-profile/Default/Cookies",
+))
+DEFAULT_TWITTER_COOKIE_PYTHON = Path(os.environ.get(
+    "KAGENTREACH_TWITTER_COOKIE_PYTHON",
+    "/home/kojima/.local/pipx/venvs/twitter-cli/bin/python",
+))
 
 
 def run(args: list[str], *, timeout: int = 120, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
@@ -53,6 +61,179 @@ def is_yahoo_comments_url(url: str) -> bool:
     parsed = urlparse(url)
     host = parsed.netloc.lower()
     return host.endswith("news.yahoo.co.jp") and "/comments" in parsed.path
+
+
+def is_x_status_url(url: str) -> bool:
+    parsed = urlparse(url)
+    host = parsed.netloc.lower()
+    return (
+        host in {"x.com", "twitter.com", "mobile.twitter.com"}
+        or host.endswith(".x.com")
+        or host.endswith(".twitter.com")
+    ) and re.search(r"/(?:i/)?status(?:es)?/\d{12,22}|/i/status/\d{12,22}", parsed.path)
+
+
+def extract_x_status_id(url: str) -> str:
+    match = re.search(r"(?:status(?:es)?|i/status)/(\d{12,22})", url)
+    if match:
+        return match.group(1)
+    match = re.search(r"(\d{12,22})", url)
+    return match.group(1) if match else ""
+
+
+def _as_int(value: Any) -> int:
+    try:
+        return int(str(value).replace(",", "").strip() or 0)
+    except Exception:
+        return 0
+
+
+def _tweet_author(item: dict[str, Any]) -> str:
+    author = item.get("author") if isinstance(item.get("author"), dict) else {}
+    screen_name = author.get("screenName") or author.get("screen_name") or author.get("username") or ""
+    name = author.get("name") or ""
+    if screen_name:
+        return f"@{str(screen_name).lstrip('@')}"
+    return clean_text(str(name or "X"), 80)
+
+
+def _tweet_likes(item: dict[str, Any]) -> int:
+    metrics = item.get("metrics") if isinstance(item.get("metrics"), dict) else {}
+    for key in ("likes", "favorite_count", "favourites_count", "like_count"):
+        if key in metrics:
+            return _as_int(metrics.get(key))
+        if key in item:
+            return _as_int(item.get(key))
+    return _as_int(item.get("likes") or item.get("favorites") or 0)
+
+
+def load_x_cookie_env() -> tuple[dict[str, str], str]:
+    """Load X auth cookies from the browser_agent Chrome profile without logging values."""
+    if os.environ.get("TWITTER_AUTH_TOKEN") and os.environ.get("TWITTER_CT0"):
+        return {}, ""
+    cookie_file = DEFAULT_X_COOKIE_FILE
+    if not cookie_file.exists():
+        return {}, f"X cookie file not found: {cookie_file}"
+    py = DEFAULT_TWITTER_COOKIE_PYTHON if DEFAULT_TWITTER_COOKIE_PYTHON.exists() else Path(sys.executable)
+    code = r'''
+import browser_cookie3
+import json
+import sys
+
+cookie_file = sys.argv[1]
+jar = browser_cookie3.chrome(cookie_file=cookie_file)
+cookies = {}
+for cookie in jar:
+    domain = cookie.domain or ""
+    if domain.endswith(".x.com") or domain.endswith(".twitter.com") or domain in ("x.com", "twitter.com", ".x.com", ".twitter.com"):
+        if cookie.name in ("auth_token", "ct0"):
+            cookies[cookie.name] = cookie.value
+if "auth_token" in cookies and "ct0" in cookies:
+    print(json.dumps(cookies))
+'''
+    try:
+        proc = subprocess.run([str(py), "-c", code, str(cookie_file)], text=True, capture_output=True, timeout=30)
+    except Exception as exc:
+        return {}, f"X cookie extraction failed: {exc}"
+    if proc.returncode != 0 or not proc.stdout.strip():
+        return {}, clean_text(proc.stderr or "X auth cookies were not found in browser_agent profile", 800)
+    try:
+        data = json.loads(proc.stdout)
+    except Exception:
+        return {}, "X cookie extraction returned invalid JSON"
+    auth_token = data.get("auth_token")
+    ct0 = data.get("ct0")
+    if not auth_token or not ct0:
+        return {}, "X auth cookies were incomplete"
+    return {"TWITTER_AUTH_TOKEN": str(auth_token), "TWITTER_CT0": str(ct0)}, ""
+
+
+def fetch_x_replies(url: str, limit: int) -> tuple[list[dict[str, Any]], dict[str, Any], str]:
+    """Fetch direct replies to an X post through twitter-cli.
+
+    The command requires an authenticated browser/cookie context. We intentionally
+    return a clear error instead of fabricating reaction points when auth is
+    missing, because kmontagenews videos should be based on real replies.
+    """
+    if not is_x_status_url(url):
+        return [], {}, ""
+    if not shutil.which("twitter"):
+        return [], {}, "twitter-cli is not installed"
+    tweet_id = extract_x_status_id(url)
+    if not tweet_id:
+        return [], {}, "tweet id was not found"
+    max_count = max(limit * 3, 12)
+    env = os.environ.copy()
+    cookie_env, cookie_error = load_x_cookie_env()
+    env.update(cookie_env)
+    try:
+        proc = subprocess.run(
+            ["twitter", "tweet", tweet_id, "-n", str(max_count), "--json"],
+            text=True,
+            capture_output=True,
+            timeout=180,
+            env=env,
+        )
+    except Exception as exc:
+        return [], {}, str(exc)
+    raw = proc.stdout.strip()
+    if proc.returncode != 0 and not raw:
+        detail = clean_text(proc.stderr, 1000)
+        if cookie_error and "No Twitter cookies found" in detail:
+            detail = f"{detail} / {cookie_error}"
+        return [], {}, detail
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return [], {}, clean_text(proc.stderr or raw, 1200)
+    if isinstance(data, dict) and data.get("ok") is False:
+        err = data.get("error") if isinstance(data.get("error"), dict) else {}
+        return [], {}, clean_text(err.get("message") or json.dumps(data, ensure_ascii=False), 1200)
+    items = data if isinstance(data, list) else data.get("tweets") or data.get("results") or data.get("data") or []
+    if not isinstance(items, list):
+        return [], {}, "twitter-cli returned an unsupported JSON shape"
+
+    original: dict[str, Any] = {}
+    replies: list[dict[str, Any]] = []
+    for index, item in enumerate(items):
+        if not isinstance(item, dict):
+            continue
+        text = clean_text(item.get("text") or item.get("full_text") or "", 520)
+        if len(text) < 8:
+            continue
+        item_id = str(item.get("id") or "")
+        author = _tweet_author(item)
+        metrics = item.get("metrics") if isinstance(item.get("metrics"), dict) else {}
+        row = {
+            "platform": "Xリプライ",
+            "id": item_id,
+            "author": author,
+            "text": text,
+            "url": f"https://x.com/i/status/{item_id}" if item_id else url,
+            "like_count": _tweet_likes(item),
+            "retweet_count": _as_int(metrics.get("retweets") or item.get("retweets") or item.get("rts") or 0),
+            "reply_count": _as_int(metrics.get("replies") or item.get("replies") or 0),
+            "posted_at": clean_text(item.get("createdAtLocal") or item.get("createdAt") or item.get("time") or "", 60),
+        }
+        if item_id == tweet_id or index == 0:
+            original = row
+            continue
+        replies.append(row)
+    original_handle = str(original.get("author") or "").lower()
+    if original_handle.startswith("@"):
+        replies = [
+            row for row in replies
+            if original_handle in str(row.get("text") or "").lower().split()[:3]
+        ]
+    replies.sort(key=lambda x: (int(x.get("like_count") or 0), int(x.get("retweet_count") or 0)), reverse=True)
+    meta = {
+        "tweet_id": tweet_id,
+        "original_text": original.get("text", ""),
+        "original_author": original.get("author", ""),
+        "original_like_count": original.get("like_count", 0),
+        "reply_total_fetched": len(replies),
+    }
+    return replies[:limit], meta, ""
 
 
 def fetch_yahoo_comments(url: str, limit: int) -> tuple[list[dict[str, Any]], dict[str, Any], str]:
@@ -243,8 +424,21 @@ def opinion_points(
     youtube: list[dict[str, Any]],
     x_results: list[dict[str, Any]],
     yahoo_comments: list[dict[str, Any]],
+    x_replies: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, str]]:
     points: list[dict[str, str]] = []
+    for item in x_replies or []:
+        text = clean_text(item.get("text") or "", 280)
+        if text:
+            likes = int(item.get("like_count") or 0)
+            label = f"いいね {likes}件"
+            points.append({
+                "platform": "Xリプライ",
+                "point": f"{label}。{text}",
+                "source_title": clean_text(item.get("author") or "Xリプライ", 120),
+                "source_url": str(item.get("url") or ""),
+                "like_count": str(likes),
+            })
     for item in yahoo_comments:
         text = clean_text(item.get("text") or "", 260)
         if text:
@@ -300,6 +494,9 @@ def main() -> int:
     yahoo_comments, yahoo_meta, yahoo_error = fetch_yahoo_comments(args.url, limit)
     if yahoo_error:
         errors.append(f"yahoo_comments: {yahoo_error}")
+    x_replies, x_reply_meta, x_reply_error = fetch_x_replies(args.url, limit)
+    if x_reply_error:
+        errors.append(f"x_replies: {x_reply_error}")
 
     web, web_error = search_web(query, limit)
     if web_error:
@@ -313,15 +510,23 @@ def main() -> int:
         if x_error:
             errors.append(f"x: {x_error}")
 
-    points = opinion_points(web, youtube, x_results, yahoo_comments)
+    points = opinion_points(web, youtube, x_results, yahoo_comments, x_replies)
     result = {
         "ok": bool(points),
         "url": args.url,
         "query": query,
-        "sources": {"yahoo_comments": yahoo_comments, "yahoo_meta": yahoo_meta, "web": web, "youtube": youtube, "x": x_results},
+        "sources": {
+            "yahoo_comments": yahoo_comments,
+            "yahoo_meta": yahoo_meta,
+            "x_replies": x_replies,
+            "x_reply_meta": x_reply_meta,
+            "web": web,
+            "youtube": youtube,
+            "x": x_results,
+        },
         "opinion_points": points,
         "errors": errors,
-        "summary": f"Yahooコメント {len(yahoo_comments)}件、Web {len(web)}件、YouTube {len(youtube)}件、X {len(x_results)}件から意見候補 {len(points)}件を収集しました。",
+        "summary": f"Yahooコメント {len(yahoo_comments)}件、Xリプライ {len(x_replies)}件、Web {len(web)}件、YouTube {len(youtube)}件、X検索 {len(x_results)}件から意見候補 {len(points)}件を収集しました。",
     }
     text = json.dumps(result, ensure_ascii=False, indent=2)
     if args.out:
