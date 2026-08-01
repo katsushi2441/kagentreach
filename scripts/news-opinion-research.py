@@ -40,6 +40,28 @@ DEFAULT_TWITTER_COOKIE_PYTHON = Path(os.environ.get(
 ))
 
 
+def resolve_mcporter() -> str | None:
+    """Find mcporter even when systemd does not inherit the interactive NVM PATH."""
+    configured = os.environ.get("KAGENTREACH_MCPORTER_BIN", "").strip()
+    candidates = [configured, shutil.which("mcporter") or ""]
+    candidates.extend(
+        str(path)
+        for path in sorted(Path.home().glob(".nvm/versions/node/*/bin/mcporter"), reverse=True)
+    )
+    for candidate in candidates:
+        if candidate and Path(candidate).is_file() and os.access(candidate, os.X_OK):
+            return candidate
+    return None
+
+
+def mcporter_command(binary: str) -> list[str]:
+    """Run an NVM-installed mcporter with its matching Node.js runtime."""
+    node = Path(binary).parent / "node"
+    if node.is_file() and os.access(node, os.X_OK):
+        return [str(node), binary]
+    return [binary]
+
+
 def run(args: list[str], *, timeout: int = 120, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
     return subprocess.run(args, cwd=str(cwd) if cwd else None, text=True, capture_output=True, timeout=timeout)
 
@@ -354,12 +376,13 @@ def parse_mcporter_exa(stdout: str, limit: int) -> list[dict[str, str]]:
 
 
 def search_web(query: str, limit: int) -> tuple[list[dict[str, str]], str]:
-    if not shutil.which("mcporter"):
+    mcporter = resolve_mcporter()
+    if not mcporter:
         return [], "mcporter is not installed"
     # Add reaction/discussion terms so we collect opinions, not only duplicate news pages.
     q = f'{query} reactions opinions analysis discussion'
     try:
-        proc = run(["mcporter", "call", f'exa.web_search_exa(query: "{q}", numResults: {limit})'], timeout=100, cwd=WORK_ROOT)
+        proc = run(mcporter_command(mcporter) + ["call", f'exa.web_search_exa(query: "{q}", numResults: {limit})'], timeout=100, cwd=WORK_ROOT)
     except Exception as exc:
         return [], str(exc)
     if proc.returncode != 0:
