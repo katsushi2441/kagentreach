@@ -43,6 +43,21 @@ POLITICS_KEYWORDS = (
     "共産", "れいわ", "参院", "衆院", "選挙", "法案", "閣議", "大臣", "省", "庁",
     "防衛", "外交", "安全保障", "予算", "税", "補助金", "給付", "規制", "政策",
 )
+# 当たった題材クラスタを優先する(2026-08-09)。在留資格動画がチャンネル最高の
+# 再生(実視聴1,700超)と登録転換を記録した。YouTubeは当たった動画の周辺題材を
+# 数日間だけ優先的に配るので、その窓のうちは同クラスタの記事を先に取る。
+# 窓が閉じた後も害はない(該当記事が無ければ従来どおりRSS順に戻るだけ)。
+PRIORITY_KEYWORDS = (
+    "在留資格", "在留", "入管", "移民", "難民", "外国人労働", "外国人材",
+    "技能実習", "特定技能", "永住", "帰化", "ビザ", "不法滞在", "外国人",
+)
+
+
+def priority_score(candidate: "Candidate") -> int:
+    text = f"{candidate.title} {candidate.article_url}"
+    return 1 if any(word in text for word in PRIORITY_KEYWORDS) else 0
+
+
 POLITICS_EXCLUDE = (
     "天気", "気温", "高温", "大雨", "台風", "地震", "火山", "警報", "熱中症",
     "事故", "火災", "逮捕", "殺人", "強盗", "熊", "クマ", "訃報", "芸能",
@@ -296,6 +311,8 @@ def run_watch(
     if include_x:
         x_candidates, x_errors = collect_x_candidates(max(10, limit_per_category * len(categories)))
     candidates = dedupe_candidates([*rss_candidates, *x_candidates])
+    # 優先クラスタを先頭へ(安定ソートなので同点内は従来のRSS順のまま)
+    candidates.sort(key=priority_score, reverse=True)
     selected: list[Candidate] = []
     skipped_processed = 0
     skipped_low_comments: list[dict[str, Any]] = []
