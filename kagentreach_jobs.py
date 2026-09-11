@@ -310,3 +310,53 @@ def run_geopolitics_osint_video_job(
     if not ok:
         raise RuntimeError(json.dumps(wrapped, ensure_ascii=False))
     return wrapped
+
+
+def check_kmontage_news_health_job(
+    window_hours: float = 36.0,
+    max_consecutive_failures: int = 2,
+    api: str = "http://127.0.0.1:18305",
+    no_email: bool = False,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """RQDB4AI entrypoint. ニュース動画が本当に仕上がっているかを見る。
+
+    watch_yahoo_news_topics_for_kmontage_job は「kmontage に渡した数」で成否を返すので、
+    渡した先が壊れていても kdeck には完了と出る（2026-09-09 の停電で 0.14 の Ollama が
+    落ちた際、7本連続で動画が作られないまま2日気づかなかった）。ここでは仕上がった数を見て、
+    末尾が連続で失敗していれば **このジョブ自体を失敗させる**。kdeck の画面が赤くなるのが検知になる。
+    """
+    cmd = [
+        sys.executable,
+        str(ROOT / "scripts" / "kmontage-news-health.py"),
+        "--api", str(api or kwargs.get("api") or "http://127.0.0.1:18305"),
+        "--window-hours", str(float(window_hours or 36.0)),
+        "--max-consecutive-failures", str(int(max_consecutive_failures or 2)),
+    ]
+    if no_email or kwargs.get("no_email"):
+        cmd.append("--no-email")
+
+    proc = subprocess.run(cmd, cwd=str(ROOT), text=True, capture_output=True,
+                          timeout=int(kwargs.get("timeout_seconds") or 300))
+    parsed = _last_json(proc.stdout)
+    healthy = bool(parsed.get("healthy"))
+    wrapped: dict[str, Any] = {
+        "ok": proc.returncode == 0 and healthy,
+        "status": "ok" if healthy else "error",
+        "items": 1,
+        "health_checks": 1,   # 1回の実行で1つの判定。kdeck の達成度はこれで数える
+        "checked": int(parsed.get("checked") or 0),
+        "healthy": healthy,
+        "consecutive_failures": int(parsed.get("consecutive_failures") or 0),
+        "last_success_at": parsed.get("last_success_at"),
+        "hours_since_last_success": parsed.get("hours_since_last_success"),
+        "notified": bool(parsed.get("notified")),
+        "source": str(kwargs.get("source") or "rqdb4ai"),
+        "returncode": proc.returncode,
+        "result": parsed,
+    }
+    if proc.stderr.strip():
+        wrapped["stderr"] = proc.stderr[-4000:]
+    if not wrapped["ok"]:
+        raise RuntimeError(json.dumps(wrapped, ensure_ascii=False))
+    return wrapped
