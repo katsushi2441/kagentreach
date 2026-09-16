@@ -387,7 +387,8 @@ def ollama_generate_json(prompt: str, *, timeout: int = 420) -> dict[str, Any]:
         "あなたはJSON APIです。内部思考、thoughtキー、説明文は禁止。"
         "Markdownを使う場合もJSONオブジェクトだけにしてください。\n\n" + prompt
     )
-    payload = json.dumps({"model": model, "prompt": strengthened, "stream": False}, ensure_ascii=False).encode("utf-8")
+    # gemma4/qwen3 は思考型。think:false が無いと response が空になる
+    payload = json.dumps({"model": model, "prompt": strengthened, "stream": False, "think": False}, ensure_ascii=False).encode("utf-8")
     req = urllib.request.Request(ollama_url, data=payload, headers={"Content-Type": "application/json"}, method="POST")
     with urllib.request.urlopen(req, timeout=timeout) as res:
         data = json.loads(res.read().decode("utf-8", errors="replace") or "{}")

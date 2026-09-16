@@ -108,7 +108,7 @@ def http_json(method: str, url: str, payload: dict[str, Any] | None = None, time
 
 def ollama_generate(prompt: str, *, format_json: bool = False, timeout: int = 240) -> str:
     url = OLLAMA_URL if OLLAMA_URL.endswith("/api/generate") else f"{OLLAMA_URL}/api/generate"
-    payload: dict[str, Any] = {"model": OLLAMA_MODEL, "prompt": prompt, "stream": False}
+    payload: dict[str, Any] = {"model": OLLAMA_MODEL, "prompt": prompt, "stream": False, "think": False}  # gemma4/qwen3 は思考型。think:false が無いと response が空になる
     if format_json:
         payload["format"] = "json"
     req = urllib.request.Request(
